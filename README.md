@@ -14,7 +14,7 @@
   <img src="https://img.shields.io/badge/FastAPI-async-009688?style=flat-square&logo=fastapi&logoColor=white" alt="fastapi" />
   <img src="https://img.shields.io/badge/Redis-cache%20%26%20memory-DC382D?style=flat-square&logo=redis&logoColor=white" alt="redis" />
   <img src="https://img.shields.io/badge/version-0.1.0--prerelease-informational?style=flat-square" alt="version" />
-  <img src="https://img.shields.io/badge/license-TBD-lightgrey?style=flat-square" alt="license" />
+  <img src="https://img.shields.io/badge/license-GPL--3.0-blue?style=flat-square" alt="license: GPL-3.0" />
 </p>
 
 [Overview](#-introducing-unboundly) • [Features](#-why-unboundly) • [Installation](#-installation) • [Quick Start](#-quick-start) • [Architecture](#-architecture-overview) • [Persona Config](#-persona-configuration) • [Roadmap](#-roadmap--known-limitations) • [Contributing](#-contributing)
@@ -349,7 +349,7 @@ Found a bug or have an idea? [Open an issue](#) — we'd love to hear from you.
 
 ## 📄 License
 
-*License to be specified.*
+This project is licensed under the **GNU General Public License v3.0 (GPL-3.0)**. See the [LICENSE](LICENSE) file for the full license text.
 
 ## 💬 Contact & Support
 
