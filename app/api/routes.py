@@ -34,6 +34,10 @@ def service(id: str) -> ConversationService:
     return _services.get(id)
 
 
+def services() -> list[ConversationService]:
+    return list((_services or {}).values())
+
+
 @router.post("/{pid}/messages")
 async def send_message(pid: str, payload: MessageIn):
     try:
@@ -122,5 +126,6 @@ async def get_personas(conversation_id: str):
 
     for p in personas:
         p["last_message"] = await service(p["id"]).get_last_message(conversation_id)
+        p["presence"] = await service(p["id"]).get_presence()
 
     return personas

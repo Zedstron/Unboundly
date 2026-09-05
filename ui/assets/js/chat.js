@@ -2,6 +2,7 @@ let personaId = false;
 let personas = [];
 let activeWebSocket = null;
 let messageCounter = 0;
+const presenceMap = new Map();
 
 const messageTickMap = new Map();
 
@@ -34,6 +35,14 @@ function getTime() {
     return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true }).toLowerCase();
 }
 
+function formatPresence(presence) {
+    if (!presence || presence.online) return 'Online';
+    const lastSeen = Number(presence.last_seen || 0) * 1000;
+    if (!lastSeen) return 'offline';
+    const minutes = Math.max(1, Math.floor((Date.now() - lastSeen) / 60000));
+    return `${minutes} min ago`;
+}
+
 function escapeHtml(t) {
     const d = document.createElement('div');
     d.textContent = t;
@@ -63,6 +72,7 @@ async function loadPersonas() {
     try {
         const r = await fetch(`/api/${getConversationId()}/personas`);
         personas = await r.json();
+        personas.forEach(p => presenceMap.set(p.id, p.presence));
         connectWebSocket();
         renderConvList(personas);
     } catch (e) {
@@ -131,7 +141,7 @@ function selectConversation(id, name, avatarSrc) {
 
     chatAvatar.src = avatarSrc || generateAvatar(name);
     chatName.textContent = name;
-    chatStatus.textContent = 'online';
+    chatStatus.textContent = formatPresence(presenceMap.get(id));
     input.focus();
 }
 
@@ -147,8 +157,12 @@ function connectWebSocket() {
                     type: 'subscribe',
                     channel: `persona:out:${p.id}${getConversationId()}`
                 }));
+                activeWebSocket.send(JSON.stringify({
+                    type: 'subscribe',
+                    channel: `persona:presence:${p.id}`
+                }));
             });
-            if (personaId) chatStatus.textContent = 'online';
+            if (personaId) chatStatus.textContent = formatPresence(presenceMap.get(personaId));
         };
 
         activeWebSocket.onmessage = async (e) => {
@@ -169,6 +183,8 @@ function connectWebSocket() {
                     toggleTyping(message.flag, pid === personaId);
                 } else if (message.type === "online") {
                     toggleOnline(pid, message.flag);
+                } else if (message.type === "presence") {
+                    updatePresence(pid, message);
                 }
             } catch (err) { console.error('Error parsing WebSocket message:', err); }
         };
@@ -184,6 +200,23 @@ function connectWebSocket() {
         };
     } catch (e) { console.error('WebSocket connection error:', e); }
 }
+
+function updatePresence(pid, presence) {
+    presenceMap.set(pid, presence);
+    if (pid === personaId) chatStatus.textContent = formatPresence(presence);
+}
+
+function toggleOnline(pid, flag) {
+    updatePresence(pid, {
+        ...(presenceMap.get(pid) || {}),
+        online: !!flag,
+        last_seen: flag ? Date.now() / 1000 : (presenceMap.get(pid) || {}).last_seen
+    });
+}
+
+setInterval(() => {
+    if (personaId) chatStatus.textContent = formatPresence(presenceMap.get(personaId));
+}, 30000);
 
 function addMessage(text, who, tickStatus = '', when = false, messageId = null) {
     const msg = document.createElement('div');

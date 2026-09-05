@@ -75,6 +75,54 @@ async def mark_message_seen(conversation_id: str, message_id: str) -> int:
         return message.id
 
 
+async def get_unread_user_messages(persona_id: str) -> list[dict]:
+    async with SessionFactory() as session:
+        result = await session.execute(
+            select(ConversationMessage)
+            .where(
+                ConversationMessage.persona_id == persona_id,
+                ConversationMessage.direction == "user",
+                ConversationMessage.status == "delivered",
+            )
+            .order_by(ConversationMessage.created_at.asc(), ConversationMessage.id.asc())
+        )
+
+        return [
+            {
+                "id": message.id,
+                "conversation_id": message.conversation_id,
+                "content": message.content,
+                "created_at": message.created_at,
+            }
+            for message in result.scalars().all()
+        ]
+
+
+async def mark_message_seen_for_persona(
+    persona_id: str,
+    conversation_id: str,
+    message_id: int,
+) -> int:
+    async with SessionFactory() as session:
+        result = await session.execute(
+            select(ConversationMessage)
+            .where(
+                ConversationMessage.persona_id == persona_id,
+                ConversationMessage.conversation_id == conversation_id,
+                ConversationMessage.id == message_id,
+                ConversationMessage.direction == "user",
+                ConversationMessage.status == "delivered",
+            )
+        )
+        message = result.scalars().first()
+        if message is None:
+            return 0
+
+        message.status = "seen"
+        await session.commit()
+        return message.id
+
+
 async def get_conversation(persona_id: str, conversation_id: str) -> list[dict]:
     async with SessionFactory() as session:
         result = await session.execute(

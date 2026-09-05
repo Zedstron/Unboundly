@@ -12,6 +12,7 @@ class BehaviorContext:
     hour: int
     idle_minutes: float
     unread: bool
+    online: bool | None = None
 
 
 class BehaviorEngine:
@@ -95,10 +96,19 @@ class BehaviorEngine:
             mood=mood,
         )
 
+        if ctx.online is True:
+            late_probability *= 0.35
+
         if self.rng.random() < late_probability:
             return Decision.LATE_REPLY
 
         return Decision.REPLY_NOW
+
+    def online_probability(self, hour: int, mood: MoodState) -> float:
+        """Return the persona's current chance of being online."""
+        online = self._online_probability(self._normalize_hour(hour), mood)
+        busy = self._clamp(float(self.availability.get("busy_probability", 0.0)))
+        return self._clamp(online * (1.0 - busy))
 
     def _online_probability(self, hour: int, mood: MoodState) -> float:
         probabilities = self.availability[
@@ -110,8 +120,6 @@ class BehaviorEngine:
         arousal = self._mood_value(mood, "arousal")
         fear = self._mood_value(mood, "fear")
 
-        # Arousal slightly increases activity.
-        # Fear slightly decreases activity.
         adjusted = (
             base
             + 0.08 * arousal

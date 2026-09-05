@@ -18,6 +18,27 @@ class RedisMemory:
         rows = await self.redis.lrange(f"persona:stm:{conversation_id}", -limit, -1)
         return [json.loads(row) for row in rows]
 
+    async def set_json(self, key: str, value: dict[str, Any], ttl: int | None = None) -> None:
+        await self.redis.set(key, json.dumps(value))
+        if ttl is not None:
+            await self.redis.expire(key, ttl)
+
+    async def get_json(self, key: str) -> dict[str, Any] | None:
+        value = await self.redis.get(key)
+        return json.loads(value) if value else None
+
+    async def get_persona_state(self, persona_id: str) -> dict[str, Any] | None:
+        return await self.get_json(f"persona:state:{persona_id}")
+
+    async def set_persona_state(self, persona_id: str, state: dict[str, Any]) -> None:
+        await self.set_json(f"persona:state:{persona_id}", state)
+
+    async def get_presence(self, persona_id: str) -> dict[str, Any] | None:
+        return await self.get_json(f"persona:presence:{persona_id}")
+
+    async def set_presence(self, persona_id: str, presence: dict[str, Any]) -> None:
+        await self.set_json(f"persona:presence:{persona_id}", presence)
+
     async def schedule(self, key: str, payload: dict[str, Any], due_at: float) -> None:
         await self.redis.zadd("persona:schedule", {json.dumps({"key": key, "payload": payload}): due_at})
 
