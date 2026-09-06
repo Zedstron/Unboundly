@@ -20,4 +20,15 @@ class PersonaStore:
         return personas
 
     def get_persona(self, persona: str) -> dict[str, Any]:
-        return json.load(open(self.path / f"{persona}.json", 'r'))
+        with open(self.path / f"{persona}.json", 'r', encoding='utf-8') as file:
+            return json.load(file)
+
+    def save_persona(self, persona: str, detail: dict[str, Any]) -> dict[str, Any]:
+        if detail.get("id") != persona:
+            raise ValueError("Persona id cannot be changed")
+
+        path = self.path / f"{persona}.json"
+        with open(path, 'w', encoding='utf-8') as file:
+            json.dump(detail, file, indent=2, ensure_ascii=False)
+            file.write('\n')
+        return detail

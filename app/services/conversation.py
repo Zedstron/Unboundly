@@ -26,6 +26,11 @@ class ConversationService:
         self.mood = MoodEngine(persona)
         self.states: dict[str, MoodState] = {}
 
+    def update_persona(self, persona: dict) -> None:
+        self.persona = persona
+        self.behavior = BehaviorEngine(persona)
+        self.mood = MoodEngine(persona)
+
     async def get_conversation(self, conversation_id: str):
         return await get_conversation(self.persona["id"], conversation_id)
 

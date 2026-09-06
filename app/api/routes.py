@@ -5,7 +5,7 @@ from app.core.logger import get_logger
 from app.domain.models import MessageIn
 from app.services.conversation import ConversationService
 from app.infrastructure.persona_store import PersonaStore
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Body, HTTPException, WebSocket, WebSocketDisconnect
 
 
 logger = get_logger(__name__)
@@ -36,6 +36,27 @@ def service(id: str) -> ConversationService:
 
 def services() -> list[ConversationService]:
     return list((_services or {}).values())
+
+
+@router.get("/{pid}/persona")
+async def get_persona(pid: str):
+    try:
+        return PersonaStore().get_persona(pid)
+    except FileNotFoundError as exc:
+        raise HTTPException(404, detail="Persona not found") from exc
+
+
+@router.put("/{pid}/persona")
+async def update_persona(pid: str, payload: dict = Body(...)):
+    try:
+        updated = PersonaStore().save_persona(pid, payload)
+        current_service = service(pid)
+        current_service.update_persona(updated)
+        return updated
+    except FileNotFoundError as exc:
+        raise HTTPException(404, detail="Persona not found") from exc
+    except ValueError as exc:
+        raise HTTPException(400, detail=str(exc)) from exc
 
 
 @router.post("/{pid}/messages")

@@ -17,6 +17,23 @@ const chatName = document.getElementById('chat-name');
 const chatStatus = document.getElementById('chat-status');
 const typingEl = document.getElementById('typing');
 const searchInput = document.getElementById('search-input');
+const hiddenPersonasKey = `hidden-personas:${getConversationId()}`;
+const personaEditor = document.getElementById('persona-editor');
+let personaEditorDraft = null;
+let personaEditorPersonaId = null;
+let activePersonaEditorCategory = null;
+
+function getHiddenPersonaIds() {
+    try {
+        return new Set(JSON.parse(localStorage.getItem(hiddenPersonasKey) || '[]'));
+    } catch (e) {
+        return new Set();
+    }
+}
+
+function saveHiddenPersonaIds(ids) {
+    localStorage.setItem(hiddenPersonasKey, JSON.stringify([...ids]));
+}
 
 const TICK_SVG = {
     sent: `<span class="tick-icon sent" aria-label="sent"><svg viewBox="0 0 16 11" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M10.9 1.2c-.2-.2-.4-.3-.6-.3s-.4.1-.5.3L3.4 9.3 1.3 7.2c-.1-.1-.3-.2-.5-.2s-.3.1-.4.2l-.3.3c-.1.1-.2.3-.2.4s.1.3.2.4l2.6 2.6c.1.1.3.2.4.2h.1c.2 0 .3-.1.4-.2l6-7.4c.1-.1.2-.3.1-.4 0-.2-.1-.3-.2-.4L10.9 1.2z"/></svg></span>`,
@@ -80,6 +97,16 @@ async function loadPersonas() {
     }
 }
 
+function showHome() {
+    personaId = false;
+    emptyState.style.display = 'flex';
+    chatMain.style.display = 'none';
+    chatArea.classList.remove('has-chat');
+    input.value = '';
+    messagesBox.querySelectorAll('.msg').forEach(message => message.remove());
+    messageTickMap.clear();
+}
+
 async function loadConversation() {
     try {
         const r = await fetch(`/api/${personaId}/conversation/` + getConversationId());
@@ -90,7 +117,8 @@ async function loadConversation() {
 
 function renderConvList(list) {
     convList.innerHTML = '';
-    list.forEach(p => {
+    const hiddenIds = getHiddenPersonaIds();
+    list.filter(p => !hiddenIds.has(String(p.id))).forEach(p => {
         const item = document.createElement('div');
         item.className = `conv-item flex px-3 cursor-pointer transition-colors items-center h-[72px] relative hover:bg-black/[.04] dark:hover:bg-white/[.04] ${p.id === personaId ? 'bg-black/[.06] dark:bg-white/[.08]' : ''}`;
         item.dataset.id = p.id;
@@ -123,6 +151,292 @@ function renderConvList(list) {
         item.addEventListener('click', () => selectConversation(p.id, p.name, avatarSrc));
         convList.appendChild(item);
     });
+}
+
+function renderPersonaPicker() {
+    const pickerList = document.getElementById('persona-picker-list');
+    const hiddenIds = getHiddenPersonaIds();
+    const available = personas;
+    pickerList.innerHTML = '';
+
+    if (!available.length) {
+        pickerList.innerHTML = '<p class="px-5 py-6 text-[14px] text-[#667781] dark:text-[#8696a0]">All personas are already in your chats.</p>';
+        return;
+    }
+
+    available.forEach(p => {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'persona-picker-item';
+        button.innerHTML = `
+            <img class="w-12 h-12 rounded-full object-cover mr-3" src="${p.dp || generateAvatar(p.name)}" alt="${escapeHtml(p.name)}" />
+            <span class="text-[16px] text-[#111b21] dark:text-[#e9edef]">${escapeHtml(p.name)}</span>
+        `;
+        button.addEventListener('click', () => {
+            hiddenIds.delete(String(p.id));
+            saveHiddenPersonaIds(hiddenIds);
+            renderConvList(personas);
+            closePersonaPicker();
+            selectConversation(p.id, p.name, p.dp || generateAvatar(p.name));
+        });
+        pickerList.appendChild(button);
+    });
+}
+
+function openPersonaPicker() {
+    renderPersonaPicker();
+    const picker = document.getElementById('persona-picker');
+    picker.classList.add('show');
+    picker.setAttribute('aria-hidden', 'false');
+}
+
+function closePersonaPicker() {
+    const picker = document.getElementById('persona-picker');
+    picker.classList.remove('show');
+    picker.setAttribute('aria-hidden', 'true');
+}
+
+function titleCase(value) {
+    return value.replace(/[_-]+/g, ' ').replace(/\b\w/g, letter => letter.toUpperCase());
+}
+
+function cloneJson(value) {
+    return JSON.parse(JSON.stringify(value));
+}
+
+function getPathValue(root, path) {
+    return path.reduce((value, key) => value[key], root);
+}
+
+function setPathValue(root, path, value) {
+    const parent = getPathValue(root, path.slice(0, -1));
+    parent[path[path.length - 1]] = value;
+}
+
+function isSliderValue(key, value) {
+    const normalizedKey = key.toLowerCase();
+    return typeof value === 'number' && value >= 0 && value <= 1 && (
+        value % 1 !== 0 || normalizedKey.includes('probability') || normalizedKey.includes('weight') || normalizedKey.includes('warmth')
+    );
+}
+
+function createEditorField(key, value, path, wide = false) {
+    const field = document.createElement('div');
+    field.className = `persona-editor-field${wide ? ' wide' : ''}`;
+    const label = document.createElement('label');
+    label.className = 'persona-editor-label';
+    label.textContent = titleCase(key);
+    field.appendChild(label);
+
+    if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+        const nested = document.createElement('div');
+        nested.className = 'persona-editor-fields';
+        Object.entries(value).forEach(([childKey, childValue]) => {
+            nested.appendChild(createEditorField(childKey, childValue, [...path, childKey], true));
+        });
+        field.appendChild(nested);
+        return field;
+    }
+
+    if (Array.isArray(value)) {
+        if (value.every(item => typeof item === 'string')) {
+            const select = document.createElement('select');
+            select.className = 'persona-editor-select';
+            select.multiple = true;
+            select.size = Math.min(Math.max(value.length, 2), 6);
+            value.forEach(optionValue => {
+                const option = document.createElement('option');
+                option.value = optionValue;
+                option.textContent = optionValue;
+                option.selected = true;
+                select.appendChild(option);
+            });
+            select.dataset.path = JSON.stringify(path);
+            select.dataset.valueType = 'string-array';
+            field.appendChild(select);
+        } else {
+            const textarea = document.createElement('textarea');
+            textarea.className = 'persona-editor-input persona-editor-textarea';
+            textarea.value = JSON.stringify(value, null, 2);
+            textarea.dataset.path = JSON.stringify(path);
+            textarea.dataset.valueType = 'json';
+            field.appendChild(textarea);
+        }
+        return field;
+    }
+
+    if (typeof value === 'boolean') {
+        const row = document.createElement('div');
+        row.className = 'persona-editor-check-row';
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.className = 'persona-editor-checkbox';
+        checkbox.checked = value;
+        checkbox.dataset.path = JSON.stringify(path);
+        checkbox.dataset.valueType = 'boolean';
+        const state = document.createElement('span');
+        state.className = 'text-[13px] text-[#667781] dark:text-[#8696a0]';
+        state.textContent = value ? 'Enabled' : 'Disabled';
+        checkbox.addEventListener('change', () => {
+            state.textContent = checkbox.checked ? 'Enabled' : 'Disabled';
+        });
+        row.append(checkbox, state);
+        field.appendChild(row);
+        return field;
+    }
+
+    if (typeof value === 'number' && isSliderValue(key, value)) {
+        const row = document.createElement('div');
+        row.className = 'persona-editor-range-row';
+        const range = document.createElement('input');
+        range.type = 'range';
+        range.className = 'persona-editor-range';
+        range.min = '0';
+        range.max = '1';
+        range.step = '0.01';
+        range.value = value;
+        range.dataset.path = JSON.stringify(path);
+        range.dataset.valueType = 'number';
+        const output = document.createElement('output');
+        output.className = 'persona-editor-value';
+        output.textContent = Number(value).toFixed(2);
+        range.addEventListener('input', () => {
+            output.textContent = Number(range.value).toFixed(2);
+        });
+        row.append(range, output);
+        field.appendChild(row);
+        return field;
+    }
+
+    const inputControl = document.createElement(typeof value === 'string' && (value.length > 100 || key === 'bio') ? 'textarea' : 'input');
+    inputControl.className = 'persona-editor-input';
+    if (inputControl.tagName === 'TEXTAREA') inputControl.classList.add('persona-editor-textarea');
+    inputControl.type = typeof value === 'number' ? 'number' : 'text';
+    inputControl.value = value ?? '';
+    inputControl.dataset.path = JSON.stringify(path);
+    inputControl.dataset.valueType = typeof value;
+    if (path.length === 1 && path[0] === 'id') inputControl.disabled = true;
+    if (key === 'bio' || key === 'dp' || key === 'name') inputControl.addEventListener('input', updatePersonaEditorHero);
+    field.appendChild(inputControl);
+    return field;
+}
+
+function updatePersonaEditorHero() {
+    if (!personaEditorDraft) return;
+    const profileControls = [...document.querySelectorAll('#persona-editor-body [data-path]')];
+    const getProfileControl = key => profileControls.find(control => {
+        try { return JSON.parse(control.dataset.path).join('.') === `profile.${key}`; } catch (error) { return false; }
+    });
+    const bioControl = getProfileControl('bio');
+    const dpControl = getProfileControl('dp');
+    const nameControl = getProfileControl('name');
+    const name = nameControl?.value || personaEditorDraft.profile?.name || 'Persona';
+    document.getElementById('persona-editor-title').textContent = name;
+    document.getElementById('persona-editor-description').textContent = bioControl?.value || personaEditorDraft.profile?.bio || 'Shape this persona\'s voice and behavior.';
+    document.getElementById('persona-editor-avatar').src = dpControl?.value || personaEditorDraft.profile?.dp || generateAvatar(name);
+}
+
+function renderPersonaEditorCategory(category) {
+    activePersonaEditorCategory = category;
+    const tabs = document.getElementById('persona-editor-tabs');
+    tabs.querySelectorAll('.persona-editor-tab').forEach(tab => tab.classList.toggle('active', tab.dataset.category === category));
+    const body = document.getElementById('persona-editor-body');
+    body.innerHTML = '';
+    const title = document.createElement('h3');
+    title.className = 'persona-editor-section-title';
+    title.textContent = titleCase(category);
+    const fields = document.createElement('div');
+    fields.className = 'persona-editor-fields';
+    const categoryValue = personaEditorDraft[category];
+    if (categoryValue && typeof categoryValue === 'object' && !Array.isArray(categoryValue)) {
+        Object.entries(categoryValue).forEach(([key, value]) => fields.appendChild(createEditorField(key, value, [category, key], true)));
+    } else {
+        fields.appendChild(createEditorField(category, categoryValue, [category], true));
+    }
+    body.append(title, fields);
+    updatePersonaEditorHero();
+}
+
+function collectPersonaEditorValues() {
+    document.querySelectorAll('#persona-editor-body [data-path]').forEach(control => {
+        const path = JSON.parse(control.dataset.path);
+        let value;
+        if (control.dataset.valueType === 'boolean') value = control.checked;
+        else if (control.dataset.valueType === 'number') value = Number(control.value);
+        else if (control.dataset.valueType === 'string-array') value = [...control.selectedOptions].map(option => option.value);
+        else if (control.dataset.valueType === 'json') {
+            try { value = JSON.parse(control.value); } catch (error) { throw new Error(`Invalid JSON in ${path.join('.')}`); }
+        } else value = control.value;
+        setPathValue(personaEditorDraft, path, value);
+    });
+}
+
+async function openPersonaEditor() {
+    if (!personaId) return;
+    const status = document.getElementById('persona-editor-status');
+    status.textContent = 'Loading persona...';
+    try {
+        const response = await fetch(`/api/${personaId}/persona`);
+        if (!response.ok) throw new Error('Unable to load persona');
+        personaEditorDraft = await response.json();
+        personaEditorPersonaId = personaId;
+        const tabs = document.getElementById('persona-editor-tabs');
+        tabs.innerHTML = '';
+        const categories = Object.keys(personaEditorDraft);
+        categories.forEach(category => {
+            const tab = document.createElement('button');
+            tab.type = 'button';
+            tab.className = 'persona-editor-tab';
+            tab.dataset.category = category;
+            tab.textContent = titleCase(category);
+            tab.addEventListener('click', () => {
+                try { collectPersonaEditorValues(); } catch (error) { document.getElementById('persona-editor-status').textContent = error.message; return; }
+                renderPersonaEditorCategory(category);
+            });
+            tabs.appendChild(tab);
+        });
+        renderPersonaEditorCategory(categories.includes('profile') ? 'profile' : categories[0]);
+        status.textContent = '';
+        personaEditor.classList.add('show');
+        personaEditor.setAttribute('aria-hidden', 'false');
+    } catch (error) {
+        status.textContent = error.message;
+    }
+}
+
+function closePersonaEditor() {
+    personaEditor.classList.remove('show');
+    personaEditor.setAttribute('aria-hidden', 'true');
+    personaEditorDraft = null;
+    personaEditorPersonaId = null;
+}
+
+async function savePersonaEditor() {
+    if (!personaEditorDraft || !personaEditorPersonaId) return;
+    const status = document.getElementById('persona-editor-status');
+    try {
+        collectPersonaEditorValues();
+        status.textContent = 'Saving...';
+        const response = await fetch(`/api/${personaEditorPersonaId}/persona`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(personaEditorDraft)
+        });
+        if (!response.ok) throw new Error('Unable to save persona');
+        const saved = await response.json();
+        const summary = personas.find(persona => String(persona.id) === String(personaEditorPersonaId));
+        if (summary) {
+            summary.name = saved.profile.name;
+            summary.dp = saved.profile.dp;
+        }
+        chatName.textContent = saved.profile.name;
+        chatAvatar.src = saved.profile.dp || generateAvatar(saved.profile.name);
+        renderConvList(personas);
+        status.textContent = 'Saved';
+        setTimeout(closePersonaEditor, 500);
+    } catch (error) {
+        status.textContent = error.message;
+    }
 }
 
 function selectConversation(id, name, avatarSrc) {
@@ -327,14 +641,26 @@ function clearVisibleMessages() {
     updateConvLastMessage(personaId, '', 'bot');
 }
 
-async function clearChat() {
-    if (!personaId || !window.confirm('Clear all messages in this chat?')) return;
+async function clearChat(askForConfirmation = true) {
+    if (!personaId || (askForConfirmation && !window.confirm('Clear all messages in this chat?'))) return;
 
     const response = await fetch(`/api/${personaId}/conversation/${getConversationId()}`, {
         method: 'DELETE'
     });
     if (!response.ok) throw new Error('Unable to clear chat');
     clearVisibleMessages();
+}
+
+async function deleteChat() {
+    if (!personaId || !window.confirm('Delete this chat and remove the persona from your chats?')) return;
+
+    const id = personaId;
+    await clearChat(false);
+    const hiddenIds = getHiddenPersonaIds();
+    hiddenIds.add(String(id));
+    saveHiddenPersonaIds(hiddenIds);
+    renderConvList(personas);
+    showHome();
 }
 
 async function deleteMessage(message) {
@@ -484,6 +810,28 @@ document.querySelector('[data-action="clear-chat"]')?.addEventListener('click', 
     }
 });
 
+document.querySelector('[data-action="close-chat"]')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.getElementById('chat-dropdown').classList.remove('show');
+    showHome();
+});
+
+document.querySelector('[data-action="delete-chat"]')?.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    document.getElementById('chat-dropdown').classList.remove('show');
+    try {
+        await deleteChat();
+    } catch (error) {
+        console.error('Delete chat error:', error);
+    }
+});
+
+document.querySelector('[data-action="contact-info"]')?.addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.getElementById('chat-dropdown').classList.remove('show');
+    openPersonaEditor();
+});
+
 const EMOJI_DATA = {
     '😀': ['😀', '😃', '😄', '😁', '😆', '😅', '🤣', '😂', '🙂', '🙃', '😉', '😊', '😇', '🥰', '😍', '🤩', '😘', '😗', '😚', '😙', '🥲', '😋', '😛', '😜', '🤪', '😝', '🤑', '🤗', '🤭', '🤫', '🤔', '🤐', '🤨', '😐', '😑', '😶', '😏', '😒', '🙄', '😬', '🤥', '😌', '😔', '😪', '🤤', '😴', '😷', '🤒', '🤕', '🤢', '🤮', '🥵', '🥶', '🥴', '😵', '🤯', '🤠', '🥳', '🥸', '😎', '🤓', '🧐'],
     '❤️': ['❤️', '🧡', '💛', '💚', '💙', '💜', '🖤', '🤍', '🤎', '💔', '❣️', '💕', '💞', '💓', '💗', '💖', '💘', '💝', '💟', '♥️', '💌', '💋', '💯', '💢', '💥', '💫', '💦', '💨', '🕳️', '💣', '💬', '🗨️', '🗯️', '💭', '💤'],
@@ -549,8 +897,20 @@ document.addEventListener('click', (e) => {
 
 document.getElementById('btn-attach')?.addEventListener('click', () => console.log('Attachment menu - placeholder'));
 document.getElementById('btn-status')?.addEventListener('click', () => console.log('Status - placeholder'));
-document.getElementById('btn-new-chat')?.addEventListener('click', () => console.log('New chat - placeholder'));
+document.getElementById('btn-new-chat')?.addEventListener('click', openPersonaPicker);
 document.getElementById('btn-menu')?.addEventListener('click', () => console.log('Sidebar menu - placeholder'));
+
+document.getElementById('close-persona-picker')?.addEventListener('click', closePersonaPicker);
+document.getElementById('persona-picker')?.addEventListener('click', (e) => {
+    if (e.target.id === 'persona-picker') closePersonaPicker();
+});
+
+document.getElementById('close-persona-editor')?.addEventListener('click', closePersonaEditor);
+document.getElementById('cancel-persona-editor')?.addEventListener('click', closePersonaEditor);
+document.getElementById('save-persona-editor')?.addEventListener('click', savePersonaEditor);
+document.getElementById('persona-editor')?.addEventListener('click', (e) => {
+    if (e.target.id === 'persona-editor') closePersonaEditor();
+});
 
 if ('Notification' in window && Notification.permission === 'default') {
     Notification.requestPermission();

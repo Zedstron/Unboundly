@@ -116,12 +116,12 @@
             </button>
           </div>
           <div class="dropdown-menu bg-white dark:bg-[#233138] shadow-[0_2px_8px_rgba(0,0,0,.18)]" id="chat-dropdown">
-            <div class="dropdown-item px-6 py-2.5 text-[14.5px] cursor-pointer text-[#111b21] dark:text-[#e9edef] hover:bg-black/5 dark:hover:bg-white/5">Contact info</div>
+            <div class="dropdown-item px-6 py-2.5 text-[14.5px] cursor-pointer text-[#111b21] dark:text-[#e9edef] hover:bg-black/5 dark:hover:bg-white/5" data-action="contact-info">Contact info</div>
             <div class="dropdown-item px-6 py-2.5 text-[14.5px] cursor-pointer text-[#111b21] dark:text-[#e9edef] hover:bg-black/5 dark:hover:bg-white/5">Select messages</div>
-            <div class="dropdown-item px-6 py-2.5 text-[14.5px] cursor-pointer text-[#111b21] dark:text-[#e9edef] hover:bg-black/5 dark:hover:bg-white/5">Close chat</div>
+            <div class="dropdown-item px-6 py-2.5 text-[14.5px] cursor-pointer text-[#111b21] dark:text-[#e9edef] hover:bg-black/5 dark:hover:bg-white/5" data-action="close-chat">Close chat</div>
             <div class="dropdown-item px-6 py-2.5 text-[14.5px] cursor-pointer text-[#111b21] dark:text-[#e9edef] hover:bg-black/5 dark:hover:bg-white/5">Mute notifications</div>
             <div class="dropdown-item px-6 py-2.5 text-[14.5px] cursor-pointer text-[#111b21] dark:text-[#e9edef] hover:bg-black/5 dark:hover:bg-white/5" data-action="clear-chat">Clear chat</div>
-            <div class="dropdown-item px-6 py-2.5 text-[14.5px] cursor-pointer text-[#ef4444] hover:bg-black/5 dark:hover:bg-white/5">Delete chat</div>
+            <div class="dropdown-item px-6 py-2.5 text-[14.5px] cursor-pointer text-[#ef4444] hover:bg-black/5 dark:hover:bg-white/5" data-action="delete-chat">Delete chat</div>
           </div>
         </div>
 
@@ -175,7 +175,40 @@
     <div class="context-menu-item px-6 py-2 text-[14px] cursor-pointer text-[#ef4444] hover:bg-black/5 dark:hover:bg-white/5" data-action="delete">Delete</div>
   </div>
 
-  <script src="/assets/js/chat.js"></script>
+  <div class="persona-picker-backdrop" id="persona-picker" aria-hidden="true">
+    <section class="persona-picker-panel bg-white dark:bg-[#202c33]" role="dialog" aria-modal="true" aria-labelledby="persona-picker-title">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-[#e9edef] dark:border-[#2a3942]">
+        <h2 class="text-[18px] text-[#111b21] dark:text-[#e9edef]" id="persona-picker-title">Start a new chat</h2>
+        <button type="button" class="w-9 h-9 rounded-full flex items-center justify-center text-[#54656f] dark:text-[#aebac1] hover:bg-black/5 dark:hover:bg-white/5" id="close-persona-picker" title="Close">
+          <span class="text-2xl leading-none" aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="persona-picker-list thin-scroll" id="persona-picker-list"></div>
+    </section>
+  </div>
+
+  <div class="persona-editor-backdrop" id="persona-editor" aria-hidden="true">
+    <section class="persona-editor-panel bg-white dark:bg-[#182229]" role="dialog" aria-modal="true" aria-labelledby="persona-editor-title">
+      <header class="persona-editor-hero">
+        <button type="button" class="persona-editor-close" id="close-persona-editor" title="Close">&times;</button>
+        <img id="persona-editor-avatar" class="persona-editor-avatar" src="" alt="" />
+        <div class="persona-editor-identity">
+          <p class="persona-editor-kicker">Persona profile</p>
+          <h2 id="persona-editor-title"></h2>
+          <p id="persona-editor-description" class="persona-editor-description"></p>
+        </div>
+      </header>
+      <nav class="persona-editor-tabs thin-scroll" id="persona-editor-tabs" aria-label="Persona categories"></nav>
+      <div class="persona-editor-body thin-scroll" id="persona-editor-body"></div>
+      <footer class="persona-editor-footer">
+        <span id="persona-editor-status" class="persona-editor-status" role="status"></span>
+        <button type="button" class="persona-editor-button secondary" id="cancel-persona-editor">Cancel</button>
+        <button type="button" class="persona-editor-button primary" id="save-persona-editor">Save changes</button>
+      </footer>
+    </section>
+  </div>
+
+  <script src="/assets/js/chat.js?v=20260906-editor"></script>
 </body>
 
 </html>
