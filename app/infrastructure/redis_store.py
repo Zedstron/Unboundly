@@ -39,6 +39,17 @@ class RedisMemory:
     async def set_presence(self, persona_id: str, presence: dict[str, Any]) -> None:
         await self.set_json(f"persona:presence:{persona_id}", presence)
 
+    async def publish_typing(self, persona_id: str, conversation_id: str, flag: bool) -> None:
+        await self.redis.publish(
+            f"persona:out:{persona_id}{conversation_id}",
+            json.dumps({
+                "type": "typing",
+                "persona_id": persona_id,
+                "conversation_id": conversation_id,
+                "flag": flag,
+            }),
+        )
+
     async def schedule(self, key: str, payload: dict[str, Any], due_at: float) -> None:
         await self.redis.zadd("persona:schedule", {json.dumps({"key": key, "payload": payload}): due_at})
 

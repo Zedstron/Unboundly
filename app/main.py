@@ -96,8 +96,9 @@ async def worker_task(redis: Redis, memory: RedisMemory) -> None:
 
                 if "text" not in payload:
                     try:
-                        messages = await conversation_service._prompt(payload['conversation_id'])
-                        payload["text"] = await conversation_service.ai.chat(messages, temperature=0.85)
+                        payload["text"] = await conversation_service.generate_reply(
+                            payload["conversation_id"]
+                        )
                     except:
                         payload["text"] = "hmmm"
 

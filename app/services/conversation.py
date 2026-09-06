@@ -99,8 +99,7 @@ class ConversationService:
             return { "decision": decision.value, "message_id": message_id }
 
 
-        messages = await self._prompt(conversation_id)
-        reply = await self.ai.chat(messages, temperature=0.85)
+        reply = await self.generate_reply(conversation_id)
 
         await self.memory.schedule(
             "reply",
@@ -113,6 +112,16 @@ class ConversationService:
         )
 
         return { "decision": decision.value, "message_id": message_id }
+
+    async def generate_reply(self, conversation_id: str) -> str:
+        messages = await self._prompt(conversation_id)
+
+        await self.memory.publish_typing(self.persona["id"], conversation_id, True)
+
+        try:
+            return await self.ai.chat(messages, temperature=0.85)
+        finally:
+            await self.memory.publish_typing(self.persona["id"], conversation_id, False)
 
     async def _prompt(self, conversation_id: str) -> list[dict[str, str]]:
         p = self.persona
@@ -228,8 +237,7 @@ class ConversationService:
                     time() + self._delay_seconds(state, action["content"]),
                 )
             elif action["decision"] == Decision.REPLY_NOW.value:
-                messages = await self._prompt(action["conversation_id"])
-                reply = await self.ai.chat(messages, temperature=0.85)
+                reply = await self.generate_reply(action["conversation_id"])
                 await self.memory.schedule(
                     "reply",
                     {
