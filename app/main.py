@@ -1,162 +1,80 @@
 import os
-import json
 import asyncio
-import time
 from pathlib import Path
 from fastapi import FastAPI
 from redis.asyncio import Redis
 from app.core.config import settings
+from app.core.logger import get_logger
 from contextlib import asynccontextmanager
 from fastapi.staticfiles import StaticFiles
+from app.services.workers import worker_task
 from app.infrastructure.sqlite import init_db
 from app.web.routes import router as web_router
-from app.infrastructure.sqlite import mark_message_seen, save_message
 from app.infrastructure.ai import OpenAICompatibleAI
 from app.infrastructure.redis_store import RedisMemory
-from app.api.routes import router as api_router, init_services, service, services
+from app.api.routes import router as api_router, init_services
 
-
-async def publish_presence(redis: Redis, persona_id: str, presence: dict) -> None:
-    await redis.publish(
-        f"persona:presence:{persona_id}",
-        json.dumps({
-            "type": "presence",
-            "persona_id": persona_id,
-            **presence,
-        }),
-    )
-
-
-async def worker_task(redis: Redis, memory: RedisMemory) -> None:
-    life_tick_at = 0.0
-    try:
-        while True:
-            now = asyncio.get_running_loop().time()
-            if now >= life_tick_at:
-                for conversation_service in services():
-                    result = await conversation_service.life_tick()
-                    if result["changed"]:
-                        await publish_presence(
-                            redis,
-                            conversation_service.persona["id"],
-                            result["presence"],
-                        )
-                    if result["became_online"]:
-                        for action in await conversation_service.process_unread_messages():
-                            channel = (
-                                f"persona:out:{conversation_service.persona['id']}"
-                                f"{action['conversation_id']}"
-                            )
-                            await redis.publish(channel, json.dumps({
-                                "type": "status",
-                                "persona_id": conversation_service.persona["id"],
-                                "conversation_id": action["conversation_id"],
-                                "message_id": action["message_id"],
-                                "status": "seen",
-                            }))
-                life_tick_at = now + 30
-
-            for item in await memory.due(limit=50):
-                payload = item["payload"]
-
-                if item["key"] == "presence_offline":
-                    persona_id = payload["persona_id"]
-                    presence = await memory.get_presence(persona_id) or {}
-                    presence["online"] = False
-                    presence["updated_at"] = time.time()
-                    await memory.set_presence(persona_id, presence)
-                    await publish_presence(redis, persona_id, presence)
-                    continue
-
-                conversation_service = service(payload["persona_id"])
-
-                if item["key"] == "reply_pending":
-                    message_id = await mark_message_seen(
-                        payload["conversation_id"], payload["user_message_id"]
-                    )
-                    if not message_id:
-                        continue
-                    channel = f"persona:out:{payload['persona_id']}{payload['conversation_id']}"
-                    await redis.publish(channel, json.dumps({
-                        "type": "status",
-                        "persona_id": payload["persona_id"],
-                        "conversation_id": payload["conversation_id"],
-                        "message_id": message_id,
-                        "status": "seen",
-                    }))
-
-                presence = {
-                    "online": True,
-                    "last_seen": time.time(),
-                    "probability": 1.0,
-                    "updated_at": time.time(),
-                }
-                await memory.set_presence(payload["persona_id"], presence)
-                await publish_presence(redis, payload["persona_id"], presence)
-
-                if "text" not in payload:
-                    try:
-                        payload["text"] = await conversation_service.generate_reply(
-                            payload["conversation_id"]
-                        )
-                    except:
-                        payload["text"] = "hmmm"
-
-                bot_message_id = await save_message(
-                    payload['persona_id'], payload['conversation_id'], 'bot', payload["text"], 'seen'
-                )
-
-                channel = f"persona:out:{payload['persona_id']}{payload['conversation_id']}"
-                await redis.publish(channel, json.dumps({
-                    "type": "message",
-                    "persona_id": payload["persona_id"],
-                    "conversation_id": payload["conversation_id"],
-                    "message_id": bot_message_id,
-                    "text": payload["text"],
-                }))
-
-                if item["key"] in {"reply", "reply_pending"}:
-                    await memory.schedule(
-                        "presence_offline",
-                        {"persona_id": payload["persona_id"]},
-                        time.time() + 30,
-                    )
-
-            await asyncio.sleep(1)
-    except asyncio.CancelledError:
-        pass
-
+logger = get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await init_db()
+    logger.info("[app/lifespan] Application startup: initializing database")
+    try:
+        await init_db()
+        logger.info("[app/lifespan] Database initialized successfully")
+    except Exception as e:
+        logger.error(f"[app/lifespan] Database initialization failed: {e}", exc_info=True)
+        raise
 
-    redis = Redis.from_url(settings.redis_url, decode_responses=True)
+    logger.info(f"[app/lifespan] Connecting to Redis: {settings.redis_url}")
+    try:
+        redis = Redis.from_url(settings.redis_url, decode_responses=True)
+        logger.info("[app/lifespan] Redis connection established")
+    except Exception as e:
+        logger.error(f"[app/lifespan] Redis connection failed: {e}", exc_info=True)
+        raise
 
+    logger.debug("[app/lifespan] Initializing RedisMemory")
     memory = RedisMemory(redis)
+    
+    logger.debug(f"[app/lifespan] Initializing OpenAI compatible AI: model={settings.llm_model}")
     ai = OpenAICompatibleAI(settings.llm_base_url, settings.llm_api_key, settings.llm_model)
 
-    init_services(memory, ai, redis)
+    logger.info("[app/lifespan] Initializing conversation services")
+    try:
+        init_services(memory, ai, redis)
+        logger.info("[app/lifespan] Conversation services initialized")
+    except Exception as e:
+        logger.error(f"[app/lifespan] Failed to initialize services: {e}", exc_info=True)
+        raise
 
     app.state.redis = redis
 
+    logger.info("[app/lifespan] Starting background worker task")
     worker = asyncio.create_task(worker_task(redis, memory))
     app.state.worker = worker
+    logger.info("[app/lifespan] Background worker task started")
 
     yield
 
+    logger.info("[app/lifespan] Application shutdown: cancelling worker task")
     worker.cancel()
     try:
         await asyncio.wait_for(worker, timeout=1.0)
     except (asyncio.CancelledError, asyncio.TimeoutError):
-        pass
+        logger.debug("[app/lifespan] Worker task cancelled or timed out")
+    except Exception as e:
+        logger.warning(f"[app/lifespan] Error cancelling worker: {e}")
 
+    logger.info("[app/lifespan] Closing Redis connection")
     try:
         await asyncio.wait_for(redis.close(), timeout=1.0)
         await asyncio.wait_for(redis.connection_pool.disconnect(), timeout=1.0)
-    except Exception:
-        pass
+        logger.info("[app/lifespan] Redis connection closed")
+    except Exception as e:
+        logger.warning(f"[app/lifespan] Error closing Redis: {e}")
 
+    logger.info("[app/lifespan] Application shutdown complete")
     asyncio.get_running_loop().call_soon(os._exit, 0)
 
 

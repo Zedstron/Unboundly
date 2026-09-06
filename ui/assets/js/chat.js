@@ -482,6 +482,9 @@ function connectWebSocket() {
         activeWebSocket.onmessage = async (e) => {
             try {
                 const message = JSON.parse(e.data);
+                if (message.type === 'subscribed')
+                    return;
+
                 const pid = message.persona_id;
 
                 if (message.type === 'message') {
