@@ -10,15 +10,13 @@ from fastapi.staticfiles import StaticFiles
 from app.services.workers import worker_task
 from app.infrastructure.sqlite import init_db
 from app.web.routes import router as web_router
-from app.infrastructure.ai import OpenAICompatibleAI
-from app.infrastructure.redis_store import RedisMemory
 from app.api.routes import router as api_router, init_services
 
 logger = get_logger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("[app/lifespan] Application startup: initializing database")
+    logger.debug("[app/lifespan] Application startup: initializing database")
     try:
         await init_db()
         logger.info("[app/lifespan] Database initialized successfully")
@@ -26,7 +24,7 @@ async def lifespan(app: FastAPI):
         logger.error(f"[app/lifespan] Database initialization failed: {e}", exc_info=True)
         raise
 
-    logger.info(f"[app/lifespan] Connecting to Redis: {settings.redis_url}")
+    logger.debug(f"[app/lifespan] Connecting to Redis: {settings.redis_url}")
     try:
         redis = Redis.from_url(settings.redis_url, decode_responses=True)
         logger.info("[app/lifespan] Redis connection established")
@@ -34,15 +32,9 @@ async def lifespan(app: FastAPI):
         logger.error(f"[app/lifespan] Redis connection failed: {e}", exc_info=True)
         raise
 
-    logger.debug("[app/lifespan] Initializing RedisMemory")
-    memory = RedisMemory(redis)
-    
-    logger.debug(f"[app/lifespan] Initializing OpenAI compatible AI: model={settings.llm_model}")
-    ai = OpenAICompatibleAI(settings.llm_base_url, settings.llm_api_key, settings.llm_model)
-
-    logger.info("[app/lifespan] Initializing conversation services")
+    logger.debug("[app/lifespan] Initializing conversation services")
     try:
-        init_services(memory, ai, redis)
+        init_services(redis)
         logger.info("[app/lifespan] Conversation services initialized")
     except Exception as e:
         logger.error(f"[app/lifespan] Failed to initialize services: {e}", exc_info=True)
@@ -50,15 +42,16 @@ async def lifespan(app: FastAPI):
 
     app.state.redis = redis
 
-    logger.info("[app/lifespan] Starting background worker task")
-    worker = asyncio.create_task(worker_task(redis, memory))
+    logger.debug("[app/lifespan] Starting background worker task")
+    worker = asyncio.create_task(worker_task(redis))
     app.state.worker = worker
-    logger.info("[app/lifespan] Background worker task started")
+    logger.debug("[app/lifespan] Background worker task started")
 
     yield
 
-    logger.info("[app/lifespan] Application shutdown: cancelling worker task")
+    logger.debug("[app/lifespan] Application shutdown: cancelling worker task")
     worker.cancel()
+
     try:
         await asyncio.wait_for(worker, timeout=1.0)
     except (asyncio.CancelledError, asyncio.TimeoutError):
@@ -66,7 +59,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"[app/lifespan] Error cancelling worker: {e}")
 
-    logger.info("[app/lifespan] Closing Redis connection")
+    logger.debug("[app/lifespan] Closing Redis connection")
     try:
         await asyncio.wait_for(redis.close(), timeout=1.0)
         await asyncio.wait_for(redis.connection_pool.disconnect(), timeout=1.0)

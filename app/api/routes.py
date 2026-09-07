@@ -14,7 +14,7 @@ _services: dict[str: ConversationService] | None = {}
 _redis: Redis | None = None
 
 
-def init_services(memory, ai, redis: Redis) -> None:
+def init_services(redis: Redis) -> None:
     global _services, _redis
     _redis = redis
 
@@ -23,7 +23,7 @@ def init_services(memory, ai, redis: Redis) -> None:
 
     for persona in store.available_personas():
         personality = store.get_persona(persona["id"])
-        _services[persona["id"]] = ConversationService(personality, memory, ai)
+        _services[persona["id"]] = ConversationService(personality, redis)
         logger.debug(f"[init_services] Service initialized for persona_id={persona['id']}")
 
 def service(id: str) -> ConversationService:

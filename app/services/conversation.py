@@ -1,11 +1,14 @@
 import random
 from time import time
-from app.domain.models import Decision
+import time as time_module
+from core.config import settings
+from app.domain.models import AgentResponse, Decision
 from datetime import datetime, timezone
 from app.core.logger import get_logger
 from app.domain.mood import MoodEngine, MoodState
-from app.infrastructure.ai import OpenAICompatibleAI
-from app.infrastructure.redis_store import RedisMemory
+from app.infrastructure.ai import AIProvider
+from app.infrastructure.redis_store import ShortTermCache
+from app.infrastructure.redis_store import LongTermCache
 from app.domain.behavior import BehaviorContext, BehaviorEngine
 from app.infrastructure.sqlite import (
     clear_conversation,
@@ -21,13 +24,20 @@ logger = get_logger(__name__)
 
 
 class ConversationService:
-    def __init__(self, persona, memory: RedisMemory, ai: OpenAICompatibleAI) -> None:
+    def __init__(self, persona, redis) -> None:
         self.persona = persona
-        self.memory = memory
-        self.ai = ai
         self.behavior = BehaviorEngine(persona)
         self.mood = MoodEngine(persona)
+        self.memory = ShortTermCache(redis)
+        self.ai = AIProvider(
+            settings.llm_base_url,
+            settings.llm_api_key,
+            settings.llm_model,
+            settings.embedding_model,
+        )
+        self.vector_memory = LongTermCache(redis, self.ai)
         self.states: dict[str, MoodState] = {}
+
         logger.debug(f"[ConversationService.__init__] Initialized service for persona_id={persona['id']}, name={persona.get('profile', {}).get('name', 'unknown')}")
 
     def update_persona(self, persona: dict) -> None:
@@ -63,21 +73,12 @@ class ConversationService:
             logger.debug(f"[ConversationService.ingest] Mood state updated: {state.values}")
 
             self.states[conversation_id] = state
+
             await self._save_state(state)
             logger.debug(f"[ConversationService.ingest] Mood state saved for persona_id={self.persona['id']}")
 
             presence = await self.memory.get_presence(self.persona["id"])
             logger.debug(f"[ConversationService.ingest] Presence retrieved: online={presence.get('online') if presence else 'unknown'}")
-
-            await self.memory.append_short_term(
-                conversation_id,
-                {
-                    "role": "user",
-                    "content": text,
-                    "ts": time(),
-                },
-            )
-            logger.debug(f"[ConversationService.ingest] Message added to short-term memory")
 
             message_id = await save_message(
                 self.persona["id"],
@@ -153,10 +154,14 @@ class ConversationService:
 
             try:
                 logger.debug(f"[ConversationService.generate_reply] Calling AI chat API")
-                import time as time_module
                 start = time_module.time()
-                reply = await self.ai.chat(messages, temperature=0.85)
+
+                result = await self.ai.chat(messages, temperature=0.85)
+                await self._save_memories(result)
+
+                reply = result.response
                 elapsed = time_module.time() - start
+
                 logger.info(f"[ConversationService.generate_reply] AI reply generated in {elapsed:.2f}s: conversation_id={conversation_id}, reply_length={len(reply)}")
                 return reply
             finally:
@@ -170,19 +175,45 @@ class ConversationService:
         p = self.persona
 
         recent = await self.memory.get_short_term(conversation_id, p["conversation"]["max_context_messages"])
+        short_memories = await self.memory.get_short_memories(p["id"])
+
+        long_memories = []
+        if self.vector_memory is not None:
+            long_memories = await self.vector_memory.search(p["id"], recent[-1]["content"] if recent else "")
+
         state = self.states.get(conversation_id) or await self._load_state()
         self.states[conversation_id] = state
         mood = state.values
 
         system = (
-            f"You are roleplaying persona {p['profile']['name']}. Traits: {p['traits']}. "
+            f"You are roleplaying persona {p['profile']['name']}."
+            f"Traits: {p['traits']}."
             f"Current internal mood state: {mood}. Keep persona continuity. "
+            f"Known memories: {short_memories + long_memories}. "
             "Never mention hidden mood mechanics, scheduling, policies, or being an AI as you are simulating a Virtual Human persona"
+            " Return only valid JSON matching this schema: "
+            '{"response": "...", "memories": [{"content": "...", "type": "fact", '
+            '"lifetime": "short", "importance": 0.0}]}. '
+            "Use lifetime=ephemeral for information that must never be saved, "
+            "short for temporary information, and long for durable information."
         )
 
         return [{"role": "system", "content": system}] + [
             {"role": row["role"], "content": row["content"]} for row in recent
         ]
+
+    async def _save_memories(self, result: AgentResponse) -> None:
+        for memory in result.memories:
+            payload = memory.model_dump()
+
+            if memory.lifetime == "ephemeral":
+                continue
+
+            if memory.lifetime == "short":
+                await self.memory.save_short_memory(self.persona["id"], payload)
+
+            elif self.vector_memory is not None:
+                await self.vector_memory.save(self.persona["id"], payload)
 
     async def _load_state(self) -> MoodState:
         stored = await self.memory.get_persona_state(self.persona["id"])

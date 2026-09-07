@@ -120,11 +120,7 @@ class BehaviorEngine:
         arousal = self._mood_value(mood, "arousal")
         fear = self._mood_value(mood, "fear")
 
-        adjusted = (
-            base
-            + 0.08 * arousal
-            - 0.12 * fear
-        )
+        adjusted = (base + (0.08 * arousal)) - (0.12 * fear)
 
         return self._clamp(adjusted)
 

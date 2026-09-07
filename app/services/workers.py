@@ -4,11 +4,10 @@ import asyncio
 from redis.asyncio import Redis
 from app.core.logger import get_logger
 from app.api.routes import service, services
-from app.infrastructure.redis_store import RedisMemory
+from app.infrastructure.redis_store import ShortTermCache
 from app.infrastructure.sqlite import mark_message_seen, save_message
 
 logger = get_logger(__name__)
-
 
 async def publish_presence(redis: Redis, persona_id: str, presence: dict) -> None:
     logger.debug(f"[publish_presence] Publishing presence for persona_id={persona_id}, presence={presence}")
@@ -26,10 +25,12 @@ async def publish_presence(redis: Redis, persona_id: str, presence: dict) -> Non
         logger.error(f"[publish_presence] Error publishing presence for persona_id={persona_id}: {e}", exc_info=True)
 
 
-async def worker_task(redis: Redis, memory: RedisMemory) -> None:
+async def worker_task(redis: Redis) -> None:
     life_tick_at = 0.0
     logger.info("[worker_task] Worker task started")
     try:
+        memory = ShortTermCache(redis)
+
         while True:
             try:
                 now = asyncio.get_running_loop().time()
@@ -58,9 +59,7 @@ async def worker_task(redis: Redis, memory: RedisMemory) -> None:
                                 logger.debug(f"[worker_task/life_tick] Processing {len(unread_actions)} unread message actions for persona_id={persona_id}")
                                 
                                 for action in unread_actions:
-                                    channel = (
-                                        f"persona:out:{conversation_service.persona['id']}{action['conversation_id']}"
-                                    )
+                                    channel = f"persona:out:{conversation_service.persona['id']}{action['conversation_id']}"
                                     logger.debug(f"[worker_task/life_tick] Publishing seen status for message_id={action['message_id']}, conversation_id={action['conversation_id']}")
 
                                     await redis.publish(channel, json.dumps({

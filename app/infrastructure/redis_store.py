@@ -1,10 +1,55 @@
 import json
 import time
-from typing import Any
+import math
+import uuid
+from typing import Any, Protocol
 from redis.asyncio import Redis
 
+class Embeddings(Protocol):
+    async def embed(self, text: str) -> list[float]: ...
 
-class RedisMemory:
+class LongTermCache:
+    def __init__(self, redis: Redis, embeddings: Embeddings) -> None:
+        self.redis = redis
+        self.embeddings = embeddings
+
+    async def save(self, persona_id: str, memory: dict[str, Any]) -> None:
+        embedding = await self.embeddings.embed(memory["content"])
+        record = {**memory, "embedding": embedding}
+        key = f"persona:memory:long:{persona_id}:{uuid.uuid4().hex}"
+
+        await self.redis.set(key, json.dumps(record))
+        await self.redis.sadd(f"persona:memory:long:index:{persona_id}", key)
+
+    async def search(self, persona_id: str, query: str, limit: int = 10) -> list[dict[str, Any]]:
+        query_vector = await self.embeddings.embed(query)
+        keys = await self.redis.smembers(f"persona:memory:long:index:{persona_id}")
+
+        records = []
+        for key in keys:
+            raw = await self.redis.get(key)
+            if not raw:
+                continue
+
+            record = json.loads(raw)
+            vector = record.pop("embedding", [])
+            score = self._cosine(query_vector, vector)
+            records.append((score, record))
+
+        return [record for _, record in sorted(records, reverse=True, key=lambda item: item[0])[:limit]]
+
+    @staticmethod
+    def _cosine(left: list[float], right: list[float]) -> float:
+        if not left or len(left) != len(right):
+            return 0.0
+
+        denominator = math.sqrt(sum(value * value for value in left)) * math.sqrt(
+            sum(value * value for value in right)
+        )
+
+        return sum(a * b for a, b in zip(left, right)) / denominator if denominator else 0.0
+
+class ShortTermCache:
     def __init__(self, client: Redis) -> None:
         self.redis = client
 
@@ -16,6 +61,21 @@ class RedisMemory:
 
     async def get_short_term(self, conversation_id: str, limit: int = 30) -> list[dict[str, Any]]:
         rows = await self.redis.lrange(f"persona:stm:{conversation_id}", -limit, -1)
+        return [json.loads(row) for row in rows]
+
+    async def save_short_memory(
+        self,
+        persona_id: str,
+        memory: dict[str, Any],
+        ttl: int = 4 * 60 * 60,
+    ) -> None:
+        key = f"persona:memory:short:{persona_id}"
+        await self.redis.rpush(key, json.dumps(memory))
+        await self.redis.ltrim(key, -1000, -1)
+        await self.redis.expire(key, ttl)
+
+    async def get_short_memories(self, persona_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        rows = await self.redis.lrange(f"persona:memory:short:{persona_id}", -limit, -1)
         return [json.loads(row) for row in rows]
 
     async def set_json(self, key: str, value: dict[str, Any], ttl: int | None = None) -> None:
