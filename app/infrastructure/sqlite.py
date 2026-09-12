@@ -123,18 +123,21 @@ async def mark_message_seen_for_persona(
         return message.id
 
 
-async def get_conversation(persona_id: str, conversation_id: str) -> list[dict]:
+async def get_conversation(persona_id: str, conversation_id: str, limit: int | None = None) -> list[dict]:
     async with SessionFactory() as session:
-        result = await session.execute(
-            select(ConversationMessage)
-            .where(
-                ConversationMessage.persona_id == persona_id,
-                ConversationMessage.conversation_id == conversation_id
-            )
-            .order_by(ConversationMessage.created_at.asc())
+        query = select(ConversationMessage).where(
+            ConversationMessage.persona_id == persona_id,
+            ConversationMessage.conversation_id == conversation_id
         )
 
-        messages = result.scalars().all()
+        if limit is not None:
+            query = query.order_by(ConversationMessage.created_at.desc()).limit(limit)
+            result = await session.execute(query)
+            messages = list(reversed(result.scalars().all()))
+        else:
+            query = query.order_by(ConversationMessage.created_at.asc())
+            result = await session.execute(query)
+            messages = result.scalars().all()
 
         return [
             {

@@ -4,7 +4,7 @@ import asyncio
 from redis.asyncio import Redis
 from app.core.logger import get_logger
 from app.api.routes import service, services
-from app.infrastructure.redis_store import ShortTermCache
+from app.infrastructure.memory import ShortTermMemory
 from app.infrastructure.sqlite import mark_message_seen, save_message
 
 logger = get_logger(__name__)
@@ -29,7 +29,7 @@ async def worker_task(redis: Redis) -> None:
     life_tick_at = 0.0
     logger.info("[worker_task] Worker task started")
     try:
-        memory = ShortTermCache(redis)
+        memory = ShortTermMemory(redis)
 
         while True:
             try:
@@ -82,7 +82,7 @@ async def worker_task(redis: Redis) -> None:
                 for item in due_items:
                     payload = item["payload"]
                     item_key = item["key"]
-                    logger.info(f"[worker_task/process_due_item] Processing task: key={item_key}, payload={payload}")
+                    logger.debug(f"[worker_task/process_due_item] Processing task: key={item_key}, payload={payload}")
 
                     try:
                         if item_key == "presence_offline":
@@ -104,10 +104,11 @@ async def worker_task(redis: Redis) -> None:
 
                         logger.debug(f"[worker_task/reply] Getting conversation service for persona_id={payload['persona_id']}")
                         conversation_service = service(payload["persona_id"])
+
                         persona_id = payload["persona_id"]
                         conversation_id = payload["conversation_id"]
 
-                        if item_key == "reply_pending":
+                        if "reply" in item_key:
                             logger.debug(f"[worker_task/reply_pending] Marking message as seen: conversation_id={conversation_id}, user_message_id={payload['user_message_id']}")
                             message_id = await mark_message_seen(conversation_id, payload["user_message_id"])
 

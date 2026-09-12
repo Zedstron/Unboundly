@@ -20,6 +20,27 @@ body {
     overflow: hidden;
 }
 
+#chat-area,
+#chat-main,
+#messages,
+#form {
+    min-height: 0;
+}
+
+#chat-main {
+    flex: 1 1 auto;
+}
+
+#messages {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+#form {
+    flex-shrink: 0;
+}
+
 .thin-scroll::-webkit-scrollbar {
     width: 6px;
 }

@@ -4,7 +4,7 @@ from redis.asyncio import Redis
 from app.core.logger import get_logger
 from app.domain.models import MessageIn
 from app.services.conversation import ConversationService
-from app.infrastructure.persona_store import PersonaStore
+from app.infrastructure.persona import PersonaStore
 from fastapi import APIRouter, Body, HTTPException, WebSocket, WebSocketDisconnect
 
 

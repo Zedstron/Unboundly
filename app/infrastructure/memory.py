@@ -8,22 +8,22 @@ from redis.asyncio import Redis
 class Embeddings(Protocol):
     async def embed(self, text: str) -> list[float]: ...
 
-class LongTermCache:
+class LongTermMemory:
     def __init__(self, redis: Redis, embeddings: Embeddings) -> None:
         self.redis = redis
         self.embeddings = embeddings
 
-    async def save(self, persona_id: str, memory: dict[str, Any]) -> None:
+    async def save(self, key: str, memory: dict[str, Any]) -> None:
         embedding = await self.embeddings.embed(memory["content"])
         record = {**memory, "embedding": embedding}
-        key = f"persona:memory:long:{persona_id}:{uuid.uuid4().hex}"
+        key = f"persona:memory:long:{key}:{uuid.uuid4().hex}"
 
         await self.redis.set(key, json.dumps(record))
-        await self.redis.sadd(f"persona:memory:long:index:{persona_id}", key)
+        await self.redis.sadd(f"persona:memory:long:index:{key}", key)
 
-    async def search(self, persona_id: str, query: str, limit: int = 10) -> list[dict[str, Any]]:
+    async def search(self, key: str, query: str, limit: int = 10) -> list[dict[str, Any]]:
         query_vector = await self.embeddings.embed(query)
-        keys = await self.redis.smembers(f"persona:memory:long:index:{persona_id}")
+        keys = await self.redis.smembers(f"persona:memory:long:index:{key}")
 
         records = []
         for key in keys:
@@ -49,33 +49,23 @@ class LongTermCache:
 
         return sum(a * b for a, b in zip(left, right)) / denominator if denominator else 0.0
 
-class ShortTermCache:
+class ShortTermMemory:
     def __init__(self, client: Redis) -> None:
         self.redis = client
 
-    async def append_short_term(self, conversation_id: str, message: dict[str, Any], ttl: int = 86400) -> None:
-        key = f"persona:stm:{conversation_id}"
-        await self.redis.rpush(key, json.dumps(message))
-        await self.redis.ltrim(key, -100, -1)
-        await self.redis.expire(key, ttl)
-
-    async def get_short_term(self, conversation_id: str, limit: int = 30) -> list[dict[str, Any]]:
-        rows = await self.redis.lrange(f"persona:stm:{conversation_id}", -limit, -1)
-        return [json.loads(row) for row in rows]
-
     async def save_short_memory(
         self,
-        persona_id: str,
+        key: str,
         memory: dict[str, Any],
         ttl: int = 4 * 60 * 60,
     ) -> None:
-        key = f"persona:memory:short:{persona_id}"
+        key = f"persona:memory:short:{key}"
         await self.redis.rpush(key, json.dumps(memory))
         await self.redis.ltrim(key, -1000, -1)
         await self.redis.expire(key, ttl)
 
-    async def get_short_memories(self, persona_id: str, limit: int = 50) -> list[dict[str, Any]]:
-        rows = await self.redis.lrange(f"persona:memory:short:{persona_id}", -limit, -1)
+    async def get_short_memories(self, key: str, limit: int = 50) -> list[dict[str, Any]]:
+        rows = await self.redis.lrange(f"persona:memory:short:{key}", -limit, -1)
         return [json.loads(row) for row in rows]
 
     async def set_json(self, key: str, value: dict[str, Any], ttl: int | None = None) -> None:
