@@ -14,8 +14,10 @@ class MoodEngine:
 
     def update(self, state: MoodState, event: str) -> MoodState:
         now = datetime.now(timezone.utc)
+
         hours = max((now - state.updated_at).total_seconds() / 3600, 0)
         decay = float(self.config.get("decay_per_hour", 0.08))
+
         updated = {}
         baseline = self.config["baseline"]
 

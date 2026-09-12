@@ -2,6 +2,7 @@ import json
 from openai import AsyncOpenAI
 from collections.abc import Sequence
 from app.core.logger import get_logger
+from app.core.prompts import get_prompt
 from app.domain.models import AgentResponse
 
 logger = get_logger(__name__)
@@ -37,7 +38,6 @@ class AIProvider:
     async def chat(self, messages: Sequence[dict[str, str]], *, temperature: float = 0.8) -> AgentResponse:
         logger.debug(f"[OpenAICompatibleAI.chat] Chat API call started: num_messages={len(messages)}, temperature={temperature}, model={self.model}")
         try:
-            print(list(messages))
             schema = AgentResponse.model_json_schema()
             schema["additionalProperties"] = False
             for definition in schema.get("$defs", {}).values():
@@ -67,7 +67,6 @@ class AIProvider:
                 )
 
             content = response.choices[0].message.content or "{}"
-            print(content)
             result = AgentResponse.model_validate(json.loads(content))
             logger.debug("Structured response received from model, returning")
 
@@ -75,6 +74,56 @@ class AIProvider:
         except Exception as e:
             logger.error(f"[OpenAICompatibleAI.chat] Error calling chat API: {e}", exc_info=True)
             raise
+
+    async def classify_event(self, text: str, allowed_events: Sequence[str]) -> str:
+        if not allowed_events:
+            raise ValueError("allowed_events must not be empty")
+
+        schema = {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "event": {
+                    "type": "string",
+                    "enum": list(allowed_events),
+                }
+            },
+            "required": ["event"],
+        }
+
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": get_prompt("event_classification", {
+                        "text": text,
+                        "allowed_events": list(allowed_events),
+                    }),
+                },
+                {"role": "user", "content": text},
+            ],
+            temperature=0.2,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "persona_event",
+                    "strict": True,
+                    "schema": schema,
+                },
+            },
+        )
+
+        content = response.choices[0].message.content
+        if not content:
+            raise ValueError("empty chat response")
+
+        payload = json.loads(content)
+        event_name = payload.get("event")
+        if isinstance(event_name, str) and event_name in allowed_events:
+            return event_name
+
+        raise ValueError(f"invalid event returned: {event_name!r}")
 
     async def embed(self, text: str) -> list[float]:
         try:

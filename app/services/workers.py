@@ -20,7 +20,7 @@ async def publish_presence(redis: Redis, persona_id: str, presence: dict) -> Non
                 **presence,
             }),
         )
-        logger.debug(f"[publish_presence] Successfully published presence for persona_id={persona_id}")
+        logger.info(f"[publish_presence] Successfully published presence for persona_id={persona_id}")
     except Exception as e:
         logger.error(f"[publish_presence] Error publishing presence for persona_id={persona_id}: {e}", exc_info=True)
 
@@ -37,6 +37,7 @@ async def worker_task(redis: Redis) -> None:
 
                 if now >= life_tick_at:
                     logger.debug(f"[worker_task] Running life_tick at {now}")
+
                     for conversation_service in services():
                         persona_id = conversation_service.persona["id"]
                         logger.debug(f"[worker_task/life_tick] Processing life_tick for persona_id={persona_id}")
@@ -47,11 +48,7 @@ async def worker_task(redis: Redis) -> None:
 
                             if result["changed"]:
                                 logger.info(f"[worker_task/life_tick] Presence changed for persona_id={persona_id}, publishing update")
-                                await publish_presence(
-                                    redis,
-                                    persona_id,
-                                    result["presence"],
-                                )
+                                await publish_presence(redis, persona_id, result["presence"])
 
                             if result["became_online"]:
                                 logger.info(f"[worker_task/life_tick] Persona became online: persona_id={persona_id}, processing unread messages")
@@ -140,7 +137,7 @@ async def worker_task(redis: Redis) -> None:
                         logger.debug(f"[worker_task/reply] Presence updated to online for persona_id={persona_id}")
 
                         if "text" not in payload:
-                            logger.info(f"[worker_task/reply] Generating reply for conversation_id={conversation_id}, persona_id={persona_id}")
+                            logger.debug(f"[worker_task/reply] Generating reply for conversation_id={conversation_id}, persona_id={persona_id}")
                             try:
                                 start_time = time.time()
                                 payload["text"] = await conversation_service.generate_reply(conversation_id)
@@ -153,13 +150,7 @@ async def worker_task(redis: Redis) -> None:
                             logger.debug(f"[worker_task/reply] Text already in payload, skipping generation")
 
                         logger.debug(f"[worker_task/reply] Saving bot message: persona_id={persona_id}, conversation_id={conversation_id}, text_length={len(payload['text'])}")
-                        bot_message_id = await save_message(
-                            payload['persona_id'],
-                            conversation_id,
-                            'bot',
-                            payload["text"],
-                            'seen'
-                        )
+                        bot_message_id = await save_message(payload['persona_id'], conversation_id, 'bot', payload["text"], 'seen')
                         logger.info(f"[worker_task/reply] Bot message saved: message_id={bot_message_id}, conversation_id={conversation_id}")
 
                         channel = f"persona:out:{payload['persona_id']}{conversation_id}"

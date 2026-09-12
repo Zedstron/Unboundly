@@ -2,14 +2,16 @@ import random
 from time import time
 import time as time_module
 from app.core.config import settings
-from app.domain.models import AgentResponse, Decision
-from datetime import datetime, timezone
 from app.core.logger import get_logger
-from app.domain.mood import MoodEngine, MoodState
+from app.core.prompts import get_prompt
+from datetime import datetime, timezone
 from app.infrastructure.ai import AIProvider
-from app.infrastructure.memory import ShortTermMemory
+from app.domain.mood import MoodEngine, MoodState
 from app.infrastructure.memory import LongTermMemory
+from app.infrastructure.memory import ShortTermMemory
+from app.domain.models import AgentResponse, Decision
 from app.domain.behavior import BehaviorContext, BehaviorEngine
+
 from app.infrastructure.sqlite import (
     clear_conversation,
     delete_message,
@@ -26,9 +28,7 @@ logger = get_logger(__name__)
 class ConversationService:
     def __init__(self, persona, redis) -> None:
         self.persona = persona
-        self.behavior = BehaviorEngine(persona)
-        self.mood = MoodEngine(persona)
-        self.memory = ShortTermMemory(redis)
+
         self.ai = AIProvider(
             base_url=settings.llm_base_url,
             api_key=settings.llm_api_key,
@@ -37,10 +37,16 @@ class ConversationService:
             embedding_base_url=settings.embedding_base_url,
             embedding_api_key=settings.embedding_api_key,
         )
-        self.vector_memory = LongTermMemory(redis, self.ai)
+
+        self.behavior = BehaviorEngine(persona)
+        self.mood = MoodEngine(persona)
+
+        self.short_memory = ShortTermMemory(redis)
+        self.long_memory = LongTermMemory(redis, self.ai)
+
         self.states: dict[str, MoodState] = {}
 
-        logger.debug(f"[ConversationService.__init__] Initialized service for persona_id={persona['id']}, name={persona.get('profile', {}).get('name', 'unknown')}")
+        logger.debug(f"[ConversationService.__init__] Initialized service for {persona.get('profile', {}).get('name', 'unknown')}")
 
     def update_persona(self, persona: dict) -> None:
         self.persona = persona
@@ -67,8 +73,8 @@ class ConversationService:
             logger.debug(f"[ConversationService.ingest] Loading mood state for persona_id={self.persona['id']}")
             state = await self._load_state()
 
-            logger.debug(f"[ConversationService.ingest] Classifying event: text={text[:50]}...")
-            event = self._classify_event(text)
+            logger.debug(f"[ConversationService.ingest] Classifying event")
+            event = await self._classify_event(text)
             logger.debug(f"[ConversationService.ingest] Event classified as: {event}")
             
             state = self.mood.update(state, event)
@@ -79,7 +85,7 @@ class ConversationService:
             await self._save_state(state)
             logger.debug(f"[ConversationService.ingest] Mood state saved for persona_id={self.persona['id']}")
 
-            presence = await self.memory.get_presence(self.persona["id"])
+            presence = await self.short_memory.get_presence(self.persona["id"])
             logger.debug(f"[ConversationService.ingest] Presence retrieved: online={presence.get('online') if presence else 'unknown'}")
 
             message_id = await save_message(
@@ -112,7 +118,7 @@ class ConversationService:
                 due = time() + self._delay_seconds(state, text)
                 logger.info(f"[ConversationService.ingest] Decision: LATE_REPLY, scheduling for {due - time():.1f} seconds from now")
 
-                await self.memory.schedule(
+                await self.short_memory.schedule(
                     "reply_pending",
                     {
                         "conversation_id": conversation_id,
@@ -128,7 +134,7 @@ class ConversationService:
             logger.info(f"[ConversationService.ingest] Decision: REPLY_NOW, generating response")
             reply = await self.generate_reply(conversation_id)
 
-            await self.memory.schedule(
+            await self.short_memory.schedule(
                 "reply",
                 {
                     "conversation_id": conversation_id,
@@ -153,7 +159,7 @@ class ConversationService:
             logger.debug(f"[ConversationService.generate_reply] Prompt built with {len(messages)} messages")
 
             logger.debug(f"[ConversationService.generate_reply] Publishing typing indicator")
-            await self.memory.publish_typing(self.persona["id"], conversation_id, True)
+            await self.short_memory.publish_typing(self.persona["id"], conversation_id, True)
 
             try:
                 logger.debug(f"[ConversationService.generate_reply] Calling AI chat API")
@@ -169,7 +175,7 @@ class ConversationService:
                 return reply
             finally:
                 logger.debug(f"[ConversationService.generate_reply] Clearing typing indicator")
-                await self.memory.publish_typing(self.persona["id"], conversation_id, False)
+                await self.short_memory.publish_typing(self.persona["id"], conversation_id, False)
         except Exception as e:
             logger.error(f"[ConversationService.generate_reply] Error generating reply: {e}", exc_info=True)
             raise
@@ -179,27 +185,26 @@ class ConversationService:
 
         history = await get_conversation(self.persona["id"], conversation_id, limit=15)
 
-        short_memories = await self.memory.get_short_memories(self.persona["id"] + conversation_id)
+        short_memories = await self.short_memory.get_short_memories(self.persona["id"] + conversation_id)
 
         long_memories = []
-        if self.vector_memory is not None and len(history) > 0:
-            long_memories = await self.vector_memory.search(self.persona["id"], history[-1]["content"])
+        if self.long_memory is not None and len(history) > 0:
+            long_memories = await self.long_memory.search(self.persona["id"], history[-1]["content"])
 
         state = self.states.get(conversation_id) or await self._load_state()
         self.states[conversation_id] = state
-        mood = state.values
 
-        system = (
-            f"You are roleplaying persona {self.persona['profile']['name']}."
-            f"Traits: {self.persona['traits']}."
-            f"Current internal mood state: {mood}. Keep persona continuity. "
-            f"Known memories: {short_memories + long_memories}. "
-            "Never mention hidden mood mechanics, scheduling, policies, or being an AI as you are simulating a Virtual Human persona"
-            " Return only valid JSON matching this schema: "
-            '{"response": "...", "memories": [{"content": "...", "type": "fact", '
-            '"lifetime": "short", "importance": 0.0}]}. '
-            "Use lifetime=ephemeral for information that must never be saved, "
-            "short for temporary information, and long for durable information."
+        system = get_prompt(
+            "persona",
+            {
+                "name": self.persona.get("profile", {}).get("name", ""),
+                "profile": self.persona.get("profile", {}),
+                "traits": self.persona.get("traits", ""),
+                "mood": state.values,
+                "short_memories": short_memories,
+                "long_memories": long_memories,
+                "language_style": self.persona.get("language_style", ""),
+            },
         )
 
         history = [ { "role": roles[m["direction"]], "content": m["content"] } for m in history ]
@@ -214,24 +219,28 @@ class ConversationService:
                 continue
 
             if memory.lifetime == "short":
-                await self.memory.save_short_memory(self.persona["id"] + conversation_id, payload)
+                await self.short_memory.save_short_memory(self.persona["id"] + conversation_id, payload)
 
-            elif self.vector_memory is not None:
-                await self.vector_memory.save(self.persona["id"] + conversation_id, payload)
+            elif self.long_memory is not None:
+                await self.long_memory.save(self.persona["id"] + conversation_id, payload)
 
     async def _load_state(self) -> MoodState:
-        stored = await self.memory.get_persona_state(self.persona["id"])
+        stored = await self.short_memory.get_persona_state(self.persona["id"])
         if stored:
             return MoodState(
                 values={key: float(value) for key, value in stored["mood"].items()},
                 updated_at=datetime.fromisoformat(stored["updated_at"]),
             )
+
         return MoodState(dict(self.persona["mood"]["baseline"]), datetime.now(timezone.utc))
 
     async def _save_state(self, state: MoodState) -> None:
-        await self.memory.set_persona_state(
+        await self.short_memory.set_persona_state(
             self.persona["id"],
-            {"mood": state.values, "updated_at": state.updated_at.isoformat()},
+            { 
+                "mood": state.values,
+                "updated_at": state.updated_at.isoformat()
+            }
         )
 
     async def life_tick(self) -> dict:
@@ -249,7 +258,7 @@ class ConversationService:
             probability = self.behavior.online_probability(now.hour, state)
             logger.debug(f"[ConversationService.life_tick] Online probability at hour {now.hour}: {probability:.2%}")
             
-            previous = await self.memory.get_presence(self.persona["id"])
+            previous = await self.short_memory.get_presence(self.persona["id"])
             online = random.random() < probability
             if previous and previous.get("online") and random.random() < 0.75:
                 online = True
@@ -264,7 +273,7 @@ class ConversationService:
                 "probability": probability,
                 "updated_at": now.timestamp(),
             }
-            await self.memory.set_presence(self.persona["id"], presence)
+            await self.short_memory.set_presence(self.persona["id"], presence)
             logger.info(f"[ConversationService.life_tick] Presence updated: online={online}, probability={probability:.2%}")
             
             became_online = online and not (previous or {}).get("online", False)
@@ -280,7 +289,7 @@ class ConversationService:
             raise
 
     async def get_presence(self) -> dict:
-        presence = await self.memory.get_presence(self.persona["id"])
+        presence = await self.short_memory.get_presence(self.persona["id"])
         if presence:
             return presence
         result = await self.life_tick()
@@ -307,7 +316,7 @@ class ConversationService:
 
                 logger.debug(f"[ConversationService.process_unread_messages] Processing message: message_id={message['id']}, conversation_id={message['conversation_id']}, content={message['content'][:50]}...")
                 
-                event = self._classify_event(message["content"])
+                event = await self._classify_event(message["content"])
                 state = self.mood.update(state, event)
                 self.states[message["conversation_id"]] = state
                 logger.debug(f"[ConversationService.process_unread_messages] Event classified as: {event}, mood updated: {state.values}")
@@ -347,7 +356,7 @@ class ConversationService:
                     delay = self._delay_seconds(state, action["content"])
                     logger.info(f"[ConversationService.process_unread_messages] Scheduling LATE_REPLY: conversation_id={action['conversation_id']}, delay_seconds={delay:.1f}")
                     
-                    await self.memory.schedule(
+                    await self.short_memory.schedule(
                         "reply",
                         {
                             "conversation_id": action["conversation_id"],
@@ -361,7 +370,7 @@ class ConversationService:
                     reply = await self.generate_reply(action["conversation_id"])
                     logger.debug(f"[ConversationService.process_unread_messages] Reply generated: length={len(reply)}")
                     
-                    await self.memory.schedule(
+                    await self.short_memory.schedule(
                         "reply",
                         {
                             "conversation_id": action["conversation_id"],
@@ -380,8 +389,25 @@ class ConversationService:
             logger.error(f"[ConversationService.process_unread_messages] Error processing unread messages: {e}", exc_info=True)
             raise
 
+    async def _classify_event(self, text: str) -> str:
+        if not text or not text.strip():
+            return "long_idle_gap"
+
+        allowed_events = list(dict.fromkeys(self.mood.config.get("event_weights", {}).keys()))
+        if not allowed_events:
+            allowed_events = ["reassurance", "compliment", "conflict", "long_idle_gap"]
+
+        try:
+            event_name = await self.ai.classify_event(text, allowed_events)
+            logger.debug(f"[ConversationService._classify_event] AI selected event: {event_name}")
+            return event_name
+        except Exception as exc:
+            logger.warning(f"[ConversationService._classify_event] AI event classification failed, falling back to keyword matching: {exc}")
+
+        return self._fallback_classify_event(text)
+
     @staticmethod
-    def _classify_event(text: str) -> str:
+    def _fallback_classify_event(text: str) -> str:
         low = text.lower()
 
         if any(x in low for x in ("sorry", "love you", "miss you", "reassure")):
