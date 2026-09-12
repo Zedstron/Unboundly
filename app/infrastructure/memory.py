@@ -16,10 +16,11 @@ class LongTermMemory:
     async def save(self, key: str, memory: dict[str, Any]) -> None:
         embedding = await self.embeddings.embed(memory["content"])
         record = {**memory, "embedding": embedding}
-        key = f"persona:memory:long:{key}:{uuid.uuid4().hex}"
+        index_key = f"persona:memory:long:index:{key}"
+        record_key = f"persona:memory:long:{key}:{uuid.uuid4().hex}"
 
-        await self.redis.set(key, json.dumps(record))
-        await self.redis.sadd(f"persona:memory:long:index:{key}", key)
+        await self.redis.set(record_key, json.dumps(record))
+        await self.redis.sadd(index_key, record_key)
 
     async def search(self, key: str, query: str, limit: int = 10) -> list[dict[str, Any]]:
         query_vector = await self.embeddings.embed(query)
@@ -91,7 +92,7 @@ class ShortTermMemory:
 
     async def publish_typing(self, persona_id: str, conversation_id: str, flag: bool) -> None:
         await self.redis.publish(
-            f"persona:out:{persona_id}{conversation_id}",
+            f"persona:out:{persona_id}:{conversation_id}",
             json.dumps({
                 "type": "typing",
                 "persona_id": persona_id,
@@ -101,13 +102,36 @@ class ShortTermMemory:
         )
 
     async def schedule(self, key: str, payload: dict[str, Any], due_at: float) -> None:
-        await self.redis.zadd("persona:schedule", {json.dumps({"key": key, "payload": payload}): due_at})
+        item = json.dumps({"id": uuid.uuid4().hex, "key": key, "payload": payload})
+        await self.redis.zadd("persona:schedule", {item: due_at})
 
     async def due(self, now: float | None = None, limit: int = 50) -> list[dict[str, Any]]:
         now = now or time.time()
         rows = await self.redis.zrangebyscore("persona:schedule", 0, now, start=0, num=limit)
 
-        if rows:
-            await self.redis.zremrangebyscore("persona:schedule", 0, now)
+        due_items = []
+        for row in rows:
+            # Claim each exact item.  The old zremrangebyscore call removed
+            # every due task, including tasks beyond ``limit`` and tasks
+            # added by another worker between the read and delete.
+            if await self.redis.zrem("persona:schedule", row):
+                due_items.append(json.loads(row))
 
-        return [ json.loads(row) for row in rows ]
+        return due_items
+
+    async def claim_follow_up(self, persona_id: str, conversation_id: str, ttl: int) -> bool:
+        key = f"persona:follow-up:pending:{persona_id}:{conversation_id}"
+        return bool(await self.redis.set(key, "1", ex=ttl, nx=True))
+
+    async def reserve_daily_follow_up(self, key: str, budget: int) -> bool:
+        """Reserve one daily initiation slot before queuing its task."""
+        count = await self.redis.incr(key)
+        if count == 1:
+            await self.redis.expire(key, 2 * 24 * 60 * 60)
+        if count <= budget:
+            return True
+        await self.redis.decr(key)
+        return False
+
+    async def release_follow_up_claim(self, persona_id: str, conversation_id: str) -> None:
+        await self.redis.delete(f"persona:follow-up:pending:{persona_id}:{conversation_id}")

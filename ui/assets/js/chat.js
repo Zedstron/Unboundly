@@ -484,7 +484,7 @@ function connectWebSocket() {
             personas.forEach(p => {
                 activeWebSocket.send(JSON.stringify({
                     type: 'subscribe',
-                    channel: `persona:out:${p.id}${getConversationId()}`
+                    channel: `persona:out:${p.id}:${getConversationId()}`
                 }));
                 activeWebSocket.send(JSON.stringify({
                     type: 'subscribe',
@@ -746,7 +746,10 @@ document.getElementById('form').addEventListener('submit', async (e) => {
         pendingMessage.dataset.messageId = x.message_id;
         messageTickMap.set(String(x.message_id), { el: pendingMessage, status: 'sent' });
 
-        const newStatus = x.decision === 'reply_now' ? 'seen' : 'delivered';
+        // The REST response acknowledges persistence only.  Read receipts
+        // and replies arrive as websocket events, so private decisions never
+        // leak to the browser.
+        const newStatus = 'delivered';
         updateLastUserTick(newStatus, x.message_id);
         updateConvTickStatus(personaId, newStatus);
         updateConvLastMessage(personaId, text, 'user');

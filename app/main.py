@@ -1,4 +1,3 @@
-import os
 import asyncio
 from pathlib import Path
 from fastapi import FastAPI
@@ -61,14 +60,13 @@ async def lifespan(app: FastAPI):
 
     logger.debug("[app/lifespan] Closing Redis connection")
     try:
-        await asyncio.wait_for(redis.close(), timeout=1.0)
+        await asyncio.wait_for(redis.aclose(), timeout=1.0)
         await asyncio.wait_for(redis.connection_pool.disconnect(), timeout=1.0)
         logger.info("[app/lifespan] Redis connection closed")
     except Exception as e:
         logger.warning(f"[app/lifespan] Error closing Redis: {e}")
 
     logger.info("[app/lifespan] Application shutdown complete")
-    asyncio.get_running_loop().call_soon(os._exit, 0)
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent

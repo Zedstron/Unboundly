@@ -56,7 +56,7 @@ async def worker_task(redis: Redis) -> None:
                                 logger.debug(f"[worker_task/life_tick] Processing {len(unread_actions)} unread message actions for persona_id={persona_id}")
                                 
                                 for action in unread_actions:
-                                    channel = f"persona:out:{conversation_service.persona['id']}{action['conversation_id']}"
+                                    channel = f"persona:out:{conversation_service.persona['id']}:{action['conversation_id']}"
                                     logger.debug(f"[worker_task/life_tick] Publishing seen status for message_id={action['message_id']}, conversation_id={action['conversation_id']}")
 
                                     await redis.publish(channel, json.dumps({
@@ -66,6 +66,13 @@ async def worker_task(redis: Redis) -> None:
                                         "message_id": action["message_id"],
                                         "status": "seen",
                                     }))
+
+                            scheduled = await conversation_service.schedule_self_follow_ups()
+                            if scheduled:
+                                logger.info(
+                                    "[worker_task/life_tick] Scheduled %s self follow-up(s) for persona_id=%s",
+                                    scheduled, persona_id,
+                                )
                         except Exception as e:
                             logger.error(f"[worker_task/life_tick] Error processing life_tick for persona_id={persona_id}: {e}", exc_info=True)
 
@@ -83,20 +90,11 @@ async def worker_task(redis: Redis) -> None:
 
                     try:
                         if item_key == "presence_offline":
-                            logger.debug(f"[worker_task/presence_offline] Handling presence_offline for persona_id={payload['persona_id']}")
-                            persona_id = payload["persona_id"]
-                            presence = await memory.get_presence(persona_id) or {}
-                            logger.debug(f"[worker_task/presence_offline] Current presence: {presence}")
-                            
-                            presence["online"] = False
-                            presence["updated_at"] = time.time()
-
-                            await memory.set_presence(persona_id, presence)
-                            logger.debug(f"[worker_task/presence_offline] Updated presence to offline for persona_id={persona_id}")
-                            
-                            await publish_presence(redis, persona_id, presence)
-                            logger.info(f"[worker_task/presence_offline] Persona marked offline: persona_id={persona_id}")
-
+                            # Legacy tasks may remain in Redis after an
+                            # upgrade. Presence is now exclusively owned by
+                            # life_tick, so an old reply timeout must not
+                            # overwrite the newer lifecycle state.
+                            logger.info("[worker_task/presence_offline] Ignoring legacy presence timeout")
                             continue
 
                         logger.debug(f"[worker_task/reply] Getting conversation service for persona_id={payload['persona_id']}")
@@ -105,7 +103,7 @@ async def worker_task(redis: Redis) -> None:
                         persona_id = payload["persona_id"]
                         conversation_id = payload["conversation_id"]
 
-                        if "reply" in item_key:
+                        if "reply" in item_key and payload.get("user_message_id") is not None:
                             logger.debug(f"[worker_task/reply_pending] Marking message as seen: conversation_id={conversation_id}, user_message_id={payload['user_message_id']}")
                             message_id = await mark_message_seen(conversation_id, payload["user_message_id"])
 
@@ -113,7 +111,7 @@ async def worker_task(redis: Redis) -> None:
                                 logger.warning(f"[worker_task/reply_pending] Failed to mark message as seen: conversation_id={conversation_id}")
                                 continue
 
-                            channel = f"persona:out:{payload['persona_id']}{conversation_id}"
+                            channel = f"persona:out:{payload['persona_id']}:{conversation_id}"
                             logger.debug(f"[worker_task/reply_pending] Publishing seen status: channel={channel}, message_id={message_id}")
                             
                             await redis.publish(channel, json.dumps({
@@ -124,23 +122,14 @@ async def worker_task(redis: Redis) -> None:
                                 "status": "seen",
                             }))
 
-                        logger.debug(f"[worker_task/reply] Updating presence to online for persona_id={persona_id}")
-                        presence = {
-                            "online": True,
-                            "probability": 1.0,
-                            "last_seen": time.time(),
-                            "updated_at": time.time()
-                        }
-
-                        await memory.set_presence(persona_id, presence)
-                        await publish_presence(redis, persona_id, presence)
-                        logger.debug(f"[worker_task/reply] Presence updated to online for persona_id={persona_id}")
-
                         if "text" not in payload:
                             logger.debug(f"[worker_task/reply] Generating reply for conversation_id={conversation_id}, persona_id={persona_id}")
                             try:
                                 start_time = time.time()
-                                payload["text"] = await conversation_service.generate_reply(conversation_id)
+                                payload["text"] = await conversation_service.generate_reply(
+                                    conversation_id,
+                                    initiative=payload.get("trigger"),
+                                )
                                 elapsed = time.time() - start_time
                                 logger.info(f"[worker_task/reply] Reply generated successfully in {elapsed:.2f}s: conversation_id={conversation_id}, text_length={len(payload['text'])}")
                             except Exception as e:
@@ -153,7 +142,7 @@ async def worker_task(redis: Redis) -> None:
                         bot_message_id = await save_message(payload['persona_id'], conversation_id, 'bot', payload["text"], 'seen')
                         logger.info(f"[worker_task/reply] Bot message saved: message_id={bot_message_id}, conversation_id={conversation_id}")
 
-                        channel = f"persona:out:{payload['persona_id']}{conversation_id}"
+                        channel = f"persona:out:{payload['persona_id']}:{conversation_id}"
                         logger.debug(f"[worker_task/reply] Publishing bot message: channel={channel}, message_id={bot_message_id}")
 
                         await redis.publish(channel, json.dumps({
@@ -165,10 +154,6 @@ async def worker_task(redis: Redis) -> None:
                         }))
                         logger.debug(f"[worker_task/reply] Bot message published: conversation_id={conversation_id}")
 
-                        if item_key in { "reply", "reply_pending" }:
-                            logger.debug(f"[worker_task/reply] Scheduling presence_offline for persona_id={persona_id} in 30 seconds")
-                            await memory.schedule("presence_offline", { "persona_id": payload["persona_id"] }, time.time() + 30)
-                    
                     except Exception as e:
                         logger.error(f"[worker_task/process_due_item] Error processing item key={item_key}: {e}", exc_info=True)
 

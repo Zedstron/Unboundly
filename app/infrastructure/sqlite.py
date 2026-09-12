@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -95,6 +95,30 @@ async def get_unread_user_messages(persona_id: str) -> list[dict]:
                 "created_at": message.created_at,
             }
             for message in result.scalars().all()
+        ]
+
+
+async def get_inactive_conversations(
+    persona_id: str,
+    inactive_since,
+) -> list[dict]:
+    """Return conversations whose latest human message predates a cutoff."""
+    async with SessionFactory() as session:
+        result = await session.execute(
+            select(
+                ConversationMessage.conversation_id,
+                func.max(ConversationMessage.created_at).label("last_user_at"),
+            )
+            .where(
+                ConversationMessage.persona_id == persona_id,
+                ConversationMessage.direction == "user",
+            )
+            .group_by(ConversationMessage.conversation_id)
+            .having(func.max(ConversationMessage.created_at) <= inactive_since)
+        )
+        return [
+            {"conversation_id": row.conversation_id, "last_user_at": row.last_user_at}
+            for row in result.all()
         ]
 
 

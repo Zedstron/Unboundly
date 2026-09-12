@@ -76,8 +76,10 @@ async def send_message(pid: str, payload: MessageIn):
     logger.info(f"[send_message] Received message for persona_id={pid}, conversation_id={payload.conversation_id}, text_length={len(payload.text)}")
     try:
         result = await service(pid).ingest(payload.conversation_id, payload.text)
-        logger.debug(f"[send_message] Message ingested successfully: decision={result.get('decision')}, message_id={result.get('message_id')}")
-        return result
+        logger.debug(f"[send_message] Message ingested successfully: message_id={result.get('message_id')}")
+        # Behavioral decisions are private model state.  The UI receives the
+        # observable effects (seen/status/reply) through the websocket.
+        return {"message_id": result["message_id"]}
     except Exception as exc:
         logger.error(f"[send_message] Error processing message for persona_id={pid}: {exc}", exc_info=True)
         raise HTTPException(502, detail=str(exc)) from exc
@@ -136,6 +138,14 @@ async def websocket_endpoint(websocket: WebSocket):
     pubsub = _redis.pubsub()
     subscribed_channels = set()
     pubsub_lock = asyncio.Lock()
+    send_lock = asyncio.Lock()
+    handlers: list[asyncio.Task] = []
+
+    async def send_json(data: dict) -> None:
+        # Both command acknowledgements and Redis forwarding write to one
+        # socket. Serialising sends avoids concurrent ASGI send operations.
+        async with send_lock:
+            await websocket.send_json(data)
     
     async def handle_redis_messages():
         try:
@@ -172,7 +182,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     }
 
                 logger.debug(f"[websocket/redis_listener] Forwarding message from channel: {channel}")
-                await websocket.send_json(data)
+                await send_json(data)
+        except WebSocketDisconnect:
+            logger.debug("[websocket/redis_listener] Client disconnected while sending")
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"[websocket/redis_listener] Error: {e}", exc_info=True)
     
@@ -192,7 +206,7 @@ async def websocket_endpoint(websocket: WebSocket):
                             await pubsub.subscribe(channel)
 
                         subscribed_channels.add(channel)
-                        await websocket.send_json({"type": "subscribed", "channel": channel})
+                        await send_json({"type": "subscribed", "channel": channel})
                     else:
                         logger.debug(f"[websocket/client_handler] Already subscribed to channel: {channel}")
 
@@ -204,19 +218,39 @@ async def websocket_endpoint(websocket: WebSocket):
                         subscribed_channels.discard(channel)
 
         except WebSocketDisconnect:
-            logger.warning("[websocket/client_handler] Client disconnected")
+            logger.info("[websocket/client_handler] Client disconnected")
+        except asyncio.CancelledError:
+            raise
         except Exception as e:
             logger.error(f"[websocket/client_handler] Error: {e}", exc_info=True)
     
     try:
         logger.debug(f"[websocket] Starting message handlers with {len(subscribed_channels)} subscribed channels")
-        await asyncio.gather(handle_redis_messages(), handle_client_commands())
+        handlers = [
+            asyncio.create_task(handle_redis_messages()),
+            asyncio.create_task(handle_client_commands()),
+        ]
+        _, pending = await asyncio.wait(handlers, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*handlers, return_exceptions=True)
+    except asyncio.CancelledError:
+        logger.debug("[websocket] Connection cancelled during shutdown")
+        raise
     finally:
+        for task in handlers:
+            if not task.done():
+                task.cancel()
+        if handlers:
+            await asyncio.gather(*handlers, return_exceptions=True)
         logger.info(f"[websocket] Cleaning up {len(subscribed_channels)} subscribed channels")
-        for ch in subscribed_channels:
-            await pubsub.unsubscribe(ch)
-
-        await pubsub.close()
+        try:
+            if subscribed_channels:
+                await pubsub.unsubscribe(*subscribed_channels)
+        except Exception as exc:
+            logger.debug("[websocket] Pubsub unsubscribe during cleanup failed: %s", exc)
+        finally:
+            await pubsub.aclose()
         logger.info("[websocket] Connection cleanup complete")
 
 @router.get("/{conversation_id}/personas")

@@ -13,6 +13,7 @@ class BehaviorContext:
     idle_minutes: float
     unread: bool
     online: bool | None = None
+    busy: bool = False
 
 
 class BehaviorEngine:
@@ -41,17 +42,18 @@ class BehaviorEngine:
         hour = self._normalize_hour(ctx.hour)
         idle_minutes = max(0.0, float(ctx.idle_minutes))
 
-        # ---------------------------------------------------------
-        # 1. Determine probability that the persona is available
-        # ---------------------------------------------------------
-        online_p = self._online_probability(hour, mood)
+        # Presence is decided by the life cycle before a message is
+        # considered.  Do not independently roll availability here: doing so
+        # allowed replies while the persisted presence was offline.
+        if ctx.online is False:
+            return Decision.NO_REPLY
 
-        # Persona may be online but busy.
-        busy_p = self._clamp(
-            float(self.availability.get("busy_probability", 0.0))
-        )
+        # A busy person can notice a message, but should not be treated as
+        # immediately available to reply.
+        if ctx.busy:
+            return Decision.LATE_REPLY if ctx.unread else Decision.NO_REPLY
 
-        available_p = online_p * (1.0 - busy_p)
+        available_p = 1.0
 
         # If the message is already unread, account for the
         # probability that the persona actually notices/reads it.
@@ -106,9 +108,19 @@ class BehaviorEngine:
 
     def online_probability(self, hour: int, mood: MoodState) -> float:
         """Return the persona's current chance of being online."""
-        online = self._online_probability(self._normalize_hour(hour), mood)
-        busy = self._clamp(float(self.availability.get("busy_probability", 0.0)))
-        return self._clamp(online * (1.0 - busy))
+        return self._online_probability(self._normalize_hour(hour), mood)
+
+    def busy_probability(self, hour: int, mood: MoodState) -> float:
+        """Return the chance that an online persona is occupied."""
+        hourly = self.availability.get("busy_probability_by_hour")
+        if isinstance(hourly, list) and len(hourly) == 24:
+            base = self._clamp(float(hourly[self._normalize_hour(hour)]))
+        else:
+            base = self._clamp(float(self.availability.get("busy_probability", 0.0)))
+
+        arousal = self._mood_value(mood, "arousal")
+        irritability = self._mood_value(mood, "irritability")
+        return self._clamp(base + 0.06 * arousal + 0.04 * irritability)
 
     def _online_probability(self, hour: int, mood: MoodState) -> float:
         probabilities = self.availability[
@@ -201,6 +213,14 @@ class BehaviorEngine:
         if not isinstance(hourly, list) or len(hourly) != 24:
             raise ValueError(
                 "online_probability_by_hour must contain exactly 24 values."
+            )
+
+        busy_hourly = availability.get("busy_probability_by_hour")
+        if busy_hourly is not None and (
+            not isinstance(busy_hourly, list) or len(busy_hourly) != 24
+        ):
+            raise ValueError(
+                "busy_probability_by_hour must contain exactly 24 values."
             )
 
         return availability

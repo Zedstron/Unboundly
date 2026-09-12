@@ -9,6 +9,7 @@ dependencies = [
   "pydantic>=2.11",
   "pydantic-settings>=2.10",
   "openai>=1.99",
+  "langgraph>=1.0",
   "redis>=6.4",
   "redisvl>=0.10",
   "mcp[cli]>=2.0",
