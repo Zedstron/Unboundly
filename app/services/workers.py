@@ -23,11 +23,14 @@ async def bridge_signal(session: str, operation: str, **kwargs):
 def transport_message_id(result) -> str | None:
     if isinstance(result, str):
         return result
+
     if not isinstance(result, dict):
         return None
+
     candidate = result.get("id") or result.get("messageId")
     if isinstance(candidate, dict):
         candidate = candidate.get("_serialized") or candidate.get("id")
+
     return str(candidate) if candidate is not None else None
 
 async def publish_presence(redis: Redis, persona_id: str, presence: dict) -> None:
@@ -71,11 +74,7 @@ async def worker_task(redis: Redis) -> None:
                                 logger.info(f"[worker_task/life_tick] Presence changed for persona_id={persona_id}, publishing update")
                                 await publish_presence(redis, persona_id, result["presence"])
                                 try:
-                                    await bridge_signal(
-                                        persona_id,
-                                        "set_online",
-                                        online=bool(result["presence"].get("online")),
-                                    )
+                                    await bridge_signal(persona_id, "set_online", online=bool(result["presence"].get("online")))
                                 except Exception:
                                     logger.exception("Failed to update WPP online presence for persona_id=%s", persona_id)
 
@@ -89,11 +88,7 @@ async def worker_task(redis: Redis) -> None:
                                     logger.debug(f"[worker_task/life_tick] Publishing seen status for message_id={action['message_id']}, conversation_id={action['conversation_id']}")
 
                                     try:
-                                        await bridge_signal(
-                                            persona_id,
-                                            "mark_seen",
-                                            chat_id=action["conversation_id"],
-                                        )
+                                        await bridge_signal(persona_id, "mark_seen", chat_id=action["conversation_id"])
                                     except Exception:
                                         logger.exception(
                                             "Failed to mark WPP chat seen: conversation_id=%s",
@@ -148,14 +143,8 @@ async def worker_task(redis: Redis) -> None:
                                 logger.warning(f"[worker_task/reply_pending] Failed to mark message as seen: conversation_id={conversation_id}")
                                 continue
 
-                            # SQLite's ID is local. WPP's markSeen operation is
-                            # chat-scoped, so use the normalized chat identity.
                             try:
-                                await bridge_signal(
-                                    payload["persona_id"],
-                                    "mark_seen",
-                                    chat_id=conversation_id,
-                                )
+                                await bridge_signal(payload["persona_id"], "mark_seen", chat_id=conversation_id)
                             except Exception:
                                 logger.exception("Failed to mark WPP chat seen: conversation_id=%s", conversation_id)
 
@@ -191,18 +180,11 @@ async def worker_task(redis: Redis) -> None:
                         logger.info(f"[worker_task/reply] Bot message saved: message_id={bot_message_id}, conversation_id={conversation_id}")
 
                         try:
-                            result = await bridge_signal(
-                                payload["persona_id"],
-                                "send_message",
-                                to=conversation_id,
-                                text=payload["text"],
-                            )
+                            result = await bridge_signal(payload["persona_id"], "send_message", to=conversation_id, text=payload["text"])
                             external_id = transport_message_id(result)
                             if external_id:
                                 await set_external_id(bot_message_id, "whatsapp", external_id)
                         except Exception:
-                            # The local message remains durable if WhatsApp is
-                            # temporarily unavailable; the worker keeps going.
                             logger.exception("Failed to send bot message through WPP: conversation_id=%s", conversation_id)
 
                         channel = f"persona:out:{payload['persona_id']}:{conversation_id}"
