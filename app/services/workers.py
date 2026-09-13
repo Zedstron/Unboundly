@@ -3,11 +3,32 @@ import time
 import asyncio
 from redis.asyncio import Redis
 from app.core.logger import get_logger
+from app.services.wppbridge import signal
 from app.api.routes import service, services
 from app.infrastructure.memory import ShortTermMemory
-from app.infrastructure.sqlite import mark_message_seen, save_message
+from app.infrastructure.sqlite import mark_message_seen, save_message, set_external_id
 
 logger = get_logger(__name__)
+
+
+async def bridge_signal(session: str, operation: str, **kwargs):
+    future = signal(session, operation, **kwargs)
+    if future is None:
+        logger.debug("WPP bridge disabled; skipping operation=%s", operation)
+        return None
+
+    return await future
+
+
+def transport_message_id(result) -> str | None:
+    if isinstance(result, str):
+        return result
+    if not isinstance(result, dict):
+        return None
+    candidate = result.get("id") or result.get("messageId")
+    if isinstance(candidate, dict):
+        candidate = candidate.get("_serialized") or candidate.get("id")
+    return str(candidate) if candidate is not None else None
 
 async def publish_presence(redis: Redis, persona_id: str, presence: dict) -> None:
     logger.debug(f"[publish_presence] Publishing presence for persona_id={persona_id}, presence={presence}")
@@ -49,6 +70,14 @@ async def worker_task(redis: Redis) -> None:
                             if result["changed"]:
                                 logger.info(f"[worker_task/life_tick] Presence changed for persona_id={persona_id}, publishing update")
                                 await publish_presence(redis, persona_id, result["presence"])
+                                try:
+                                    await bridge_signal(
+                                        persona_id,
+                                        "set_online",
+                                        online=bool(result["presence"].get("online")),
+                                    )
+                                except Exception:
+                                    logger.exception("Failed to update WPP online presence for persona_id=%s", persona_id)
 
                             if result["became_online"]:
                                 logger.info(f"[worker_task/life_tick] Persona became online: persona_id={persona_id}, processing unread messages")
@@ -58,6 +87,18 @@ async def worker_task(redis: Redis) -> None:
                                 for action in unread_actions:
                                     channel = f"persona:out:{conversation_service.persona['id']}:{action['conversation_id']}"
                                     logger.debug(f"[worker_task/life_tick] Publishing seen status for message_id={action['message_id']}, conversation_id={action['conversation_id']}")
+
+                                    try:
+                                        await bridge_signal(
+                                            persona_id,
+                                            "mark_seen",
+                                            chat_id=action["conversation_id"],
+                                        )
+                                    except Exception:
+                                        logger.exception(
+                                            "Failed to mark WPP chat seen: conversation_id=%s",
+                                            action["conversation_id"],
+                                        )
 
                                     await redis.publish(channel, json.dumps({
                                         "type": "status",
@@ -107,6 +148,17 @@ async def worker_task(redis: Redis) -> None:
                                 logger.warning(f"[worker_task/reply_pending] Failed to mark message as seen: conversation_id={conversation_id}")
                                 continue
 
+                            # SQLite's ID is local. WPP's markSeen operation is
+                            # chat-scoped, so use the normalized chat identity.
+                            try:
+                                await bridge_signal(
+                                    payload["persona_id"],
+                                    "mark_seen",
+                                    chat_id=conversation_id,
+                                )
+                            except Exception:
+                                logger.exception("Failed to mark WPP chat seen: conversation_id=%s", conversation_id)
+
                             channel = f"persona:out:{payload['persona_id']}:{conversation_id}"
                             logger.debug(f"[worker_task/reply_pending] Publishing seen status: channel={channel}, message_id={message_id}")
                             
@@ -137,6 +189,21 @@ async def worker_task(redis: Redis) -> None:
                         logger.debug(f"[worker_task/reply] Saving bot message: persona_id={persona_id}, conversation_id={conversation_id}, text_length={len(payload['text'])}")
                         bot_message_id = await save_message(payload['persona_id'], conversation_id, 'bot', payload["text"], 'seen')
                         logger.info(f"[worker_task/reply] Bot message saved: message_id={bot_message_id}, conversation_id={conversation_id}")
+
+                        try:
+                            result = await bridge_signal(
+                                payload["persona_id"],
+                                "send_message",
+                                to=conversation_id,
+                                text=payload["text"],
+                            )
+                            external_id = transport_message_id(result)
+                            if external_id:
+                                await set_external_id(bot_message_id, "whatsapp", external_id)
+                        except Exception:
+                            # The local message remains durable if WhatsApp is
+                            # temporarily unavailable; the worker keeps going.
+                            logger.exception("Failed to send bot message through WPP: conversation_id=%s", conversation_id)
 
                         channel = f"persona:out:{payload['persona_id']}:{conversation_id}"
                         logger.debug(f"[worker_task/reply] Publishing bot message: channel={channel}, message_id={bot_message_id}")

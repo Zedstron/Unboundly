@@ -3,19 +3,51 @@ from __future__ import annotations
 from dotenv import load_dotenv
 load_dotenv()
 
-import os
-import janus
 import asyncio
 import inspect
+import os
 import threading
-from pathlib import Path
-from WPP_Whatsapp import Create
-from dataclasses import dataclass
 from concurrent.futures import Future
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import janus
+from WPP_Whatsapp import Create
+
 from app.core.logger import get_logger
-from typing import Any, Awaitable, Callable
 
 logger = get_logger("wppbridge")
+
+
+class _SafeCreate(Create):
+    def _onStateChange(self, state):
+        self.state = state
+
+        if state == "CONNECTED":
+            self.logger.info("Ready ....")
+        elif state in {"browserClose", "serverClose"}:
+            self.state = "CLOSED"
+            self.client = None
+            self.logger.info("client.close - session.state: CLOSED")
+
+        if self.onStateChange:
+            self.onStateChange(state)
+
+
+def _print_qr(**payload: Any) -> None:
+    ascii_qr = payload.get("asciiQR") or payload.get("qrCode")
+    attempt = payload.get("attempt", "?")
+
+    if ascii_qr:
+        print(
+            f"\n[WPPConnect] Scan this QR code with WhatsApp "
+            f"(attempt {attempt}):\n{ascii_qr}\n",
+            flush=True,
+        )
+    else:
+        logger.warning("WPPConnect generated a QR code without terminal data (attempt %s)", attempt)
 
 
 @dataclass(slots=True)
@@ -48,7 +80,7 @@ class AwaitableFuture:
 class Bridge:
     def __init__(self):
         self.session = os.getenv("WPPBRIDGE_SESSION", "wppbridge")
-        self.token_dir = os.getenv("WPPBRIDGE_TOKEN_DIR", os.path.join(os.getcwd(), "tokens"))
+        self.token_dir = os.getenv("WPPBRIDGE_TOKEN_DIR") or os.path.join(os.getcwd(), "tokens")
         self.queue_size = int(os.getenv("WPPBRIDGE_QUEUE_SIZE", "1000"))
         self.headless = os.getenv("WPPBRIDGE_HEADLESS", "0") == "1"
 
@@ -66,7 +98,7 @@ class Bridge:
         self._startup_error: BaseException | None = None
 
         self._client = None
-        self._handlers: list[Callable[[dict[str, Any]], Any]] = []
+        self._handlers: list[Callable[[str, dict[str, Any]], Any]] = []
         self._handlers_lock = threading.RLock()
 
         self._thread.start()
@@ -93,7 +125,7 @@ class Bridge:
 
         return AwaitableFuture(future)
 
-    def on_message(self, handler: Callable[[dict[str, Any]], Any]) -> Callable[[], None]:
+    def on_message(self, handler: Callable[[str, dict[str, Any]], Any]) -> Callable[[], None]:
         if not callable(handler):
             raise TypeError("handler must be callable")
 
@@ -129,9 +161,10 @@ class Bridge:
     async def _bootstrap(self) -> None:
         Path(self.token_dir).mkdir(parents=True, exist_ok=True)
 
-        creator = Create(
+        creator = _SafeCreate(
             session=self.session,
             folderNameToken=self.token_dir,
+            catchQR=_print_qr,
             waitForLogin=True,
             logQR=True,
             headless=self.headless,
@@ -141,8 +174,7 @@ class Bridge:
         )
 
         self._creator = creator
-
-        client = await asyncio.to_thread(creator.start)
+        client = await creator.start_()
 
         if client is None:
             raise RuntimeError("WPP_Whatsapp failed to create client")
@@ -306,12 +338,18 @@ class Bridge:
         self._stopped.set()
 
 
-_bridge = Bridge()
+_bridge = None
+if os.getenv("WPPBRIDGE_ENABLED", "0") == "1":
+    _bridge = Bridge()
 
 
 def signal(session, operation: str, *args: Any, **kwargs: Any) -> AwaitableFuture:
-    return _bridge.signal(session, operation, *args, **kwargs)
+    if _bridge:
+        return _bridge.signal(session, operation, *args, **kwargs)
 
 
 def on_message(handler: Callable[[str, dict[str, Any]], Any]) -> Callable[[], None]:
-    return _bridge.on_message(handler)
+    if _bridge:
+        return _bridge.on_message(handler)
+
+    return handler

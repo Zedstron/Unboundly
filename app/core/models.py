@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import DateTime, Integer, String, Text
+from sqlalchemy import DateTime, Integer, String, Text, Index
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 class Base(DeclarativeBase):
@@ -14,9 +14,18 @@ class ConversationMessage(Base):
     direction: Mapped[str] = mapped_column(String(20), nullable=False)
     status: Mapped[str] = mapped_column(String(50), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    # IDs assigned by the transport (for example WPP/WhatsApp) are not the
+    # same as our local database ID. Keep both so inbound retries are safe and
+    # outbound UI events can refer to the transport message when needed.
+    source: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    sender_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         default=lambda: datetime.now(timezone.utc),
     )
+
+
+Index("ix_conversation_messages_external", "source", "external_id")

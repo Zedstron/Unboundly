@@ -55,7 +55,15 @@ class ConversationService:
     async def clear_conversation(self, conversation_id: str) -> int:
         return await clear_conversation(self.persona["id"], conversation_id)
 
-    async def ingest(self, conversation_id: str, text: str) -> dict:
+    async def ingest(
+        self,
+        conversation_id: str,
+        text: str,
+        *,
+        source: str | None = None,
+        external_id: str | None = None,
+        sender_id: str | None = None,
+    ) -> dict:
         logger.info(f"[ConversationService.ingest] Starting ingestion: persona_id={self.persona['id']}, conversation_id={conversation_id}, text_length={len(text)}")
         try:
             logger.debug(f"[ConversationService.ingest] Loading mood state for persona_id={self.persona['id']}")
@@ -85,6 +93,9 @@ class ConversationService:
                 "user",
                 text,
                 "delivered",
+                source=source,
+                external_id=external_id,
+                sender_id=sender_id,
             )
             logger.debug(f"[ConversationService.ingest] User message saved: message_id={message_id}")
 

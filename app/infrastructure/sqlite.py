@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
@@ -29,9 +29,32 @@ SessionFactory = async_sessionmaker(
 async def init_db() -> None:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
+        # create_all does not add columns to an existing SQLite database.
+        # Keep startup backwards compatible for installations created before
+        # transport message identity was introduced.
+        columns = {
+            row[1] for row in (await connection.execute(text("PRAGMA table_info(conversation_messages)"))).all()
+        }
+        for name, definition in (
+            ("source", "VARCHAR(30)"),
+            ("external_id", "VARCHAR(255)"),
+            ("sender_id", "VARCHAR(255)"),
+        ):
+            if name not in columns:
+                await connection.execute(text(f"ALTER TABLE conversation_messages ADD COLUMN {name} {definition}"))
 
 
-async def save_message(persona_id: str, conversation_id: str, direction: Literal["user", "bot"], content: str, status: Literal["delivered", "seen"]) -> int:
+async def save_message(
+    persona_id: str,
+    conversation_id: str,
+    direction: Literal["user", "bot"],
+    content: str,
+    status: Literal["delivered", "seen"],
+    *,
+    source: str | None = None,
+    external_id: str | None = None,
+    sender_id: str | None = None,
+) -> int:
     if direction not in ("user", "bot"):
         raise ValueError("direction must be either 'user' or 'bot'")
 
@@ -44,7 +67,10 @@ async def save_message(persona_id: str, conversation_id: str, direction: Literal
             conversation_id=conversation_id,
             direction=direction,
             content=content,
-            status=status
+            status=status,
+            source=source,
+            external_id=external_id,
+            sender_id=sender_id,
         )
 
         session.add(message)
@@ -53,6 +79,31 @@ async def save_message(persona_id: str, conversation_id: str, direction: Literal
         await session.refresh(message)
 
         return message.id
+
+
+async def get_message_by_external_id(source: str, external_id: str):
+    async with SessionFactory() as session:
+        result = await session.execute(
+            select(ConversationMessage).where(
+                ConversationMessage.source == source,
+                ConversationMessage.external_id == external_id,
+            ).limit(1)
+        )
+        return result.scalars().first()
+
+
+async def set_external_id(message_id: int, source: str, external_id: str) -> bool:
+    async with SessionFactory() as session:
+        result = await session.execute(
+            select(ConversationMessage).where(ConversationMessage.id == message_id).limit(1)
+        )
+        message = result.scalars().first()
+        if message is None:
+            return False
+        message.source = source
+        message.external_id = external_id
+        await session.commit()
+        return True
 
 
 async def mark_message_seen(conversation_id: str, message_id: str) -> int:
