@@ -77,9 +77,8 @@ async def send_message(pid: str, payload: MessageIn):
     try:
         result = await service(pid).ingest(payload.conversation_id, payload.text)
         logger.debug(f"[send_message] Message ingested successfully: message_id={result.get('message_id')}")
-        # Behavioral decisions are private model state.  The UI receives the
-        # observable effects (seen/status/reply) through the websocket.
-        return {"message_id": result["message_id"]}
+
+        return result
     except Exception as exc:
         logger.error(f"[send_message] Error processing message for persona_id={pid}: {exc}", exc_info=True)
         raise HTTPException(502, detail=str(exc)) from exc
@@ -142,8 +141,6 @@ async def websocket_endpoint(websocket: WebSocket):
     handlers: list[asyncio.Task] = []
 
     async def send_json(data: dict) -> None:
-        # Both command acknowledgements and Redis forwarding write to one
-        # socket. Serialising sends avoids concurrent ASGI send operations.
         async with send_lock:
             await websocket.send_json(data)
     
@@ -233,6 +230,7 @@ async def websocket_endpoint(websocket: WebSocket):
         _, pending = await asyncio.wait(handlers, return_when=asyncio.FIRST_COMPLETED)
         for task in pending:
             task.cancel()
+
         await asyncio.gather(*handlers, return_exceptions=True)
     except asyncio.CancelledError:
         logger.debug("[websocket] Connection cancelled during shutdown")
@@ -241,8 +239,10 @@ async def websocket_endpoint(websocket: WebSocket):
         for task in handlers:
             if not task.done():
                 task.cancel()
+
         if handlers:
             await asyncio.gather(*handlers, return_exceptions=True)
+
         logger.info(f"[websocket] Cleaning up {len(subscribed_channels)} subscribed channels")
         try:
             if subscribed_channels:
@@ -251,11 +251,13 @@ async def websocket_endpoint(websocket: WebSocket):
             logger.debug("[websocket] Pubsub unsubscribe during cleanup failed: %s", exc)
         finally:
             await pubsub.aclose()
+
         logger.info("[websocket] Connection cleanup complete")
 
 @router.get("/{conversation_id}/personas")
 async def get_personas(conversation_id: str):
     logger.debug(f"[get_personas] Fetching personas for conversation: conversation_id={conversation_id}")
+
     try:
         personas = PersonaStore().available_personas()
         logger.debug(f"[get_personas] Found {len(personas)} personas, fetching presence and messages")

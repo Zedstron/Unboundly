@@ -371,7 +371,6 @@ class ConversationService:
         return min(maximum, max(minimum, base * (1.0 + max(0.0, -arousal))))
 
     async def schedule_self_follow_ups(self) -> int:
-        """Queue a natural, persona-configured initiation for an idle chat."""
         cfg = self.persona.get("self_trigger", {})
         if not cfg.get("enabled"):
             return 0
@@ -408,30 +407,34 @@ class ConversationService:
 
         random.shuffle(candidates)
         candidate = None
+
         for possible_candidate in candidates:
             threshold = await self._follow_up_threshold(
                 possible_candidate["conversation_id"],
                 possible_candidate["last_user_at"],
                 idle_config,
             )
+
             last_user_at = possible_candidate["last_user_at"]
             if last_user_at.tzinfo is None:
                 last_user_at = last_user_at.replace(tzinfo=timezone.utc)
+
             idle_minutes = (datetime.now(timezone.utc) - last_user_at).total_seconds() / 60
             if idle_minutes >= threshold:
                 candidate = possible_candidate
                 break
+
         if candidate is None:
             return 0
 
         conversation_id = candidate["conversation_id"]
         cooldown = self._sample_duration(cfg.get("cooldown_minutes"), default=minimum_idle)
-        # A Redis lease prevents every 30-second life tick from scheduling a
-        # duplicate initiation for the same inactive conversation.
+
         if not await self.short_memory.claim_follow_up(
             self.persona["id"], conversation_id, int(cooldown * 60)
         ):
             return 0
+
         if not await self.short_memory.reserve_daily_follow_up(sent_key, daily_budget):
             await self.short_memory.release_follow_up_claim(self.persona["id"], conversation_id)
             return 0
@@ -439,6 +442,7 @@ class ConversationService:
         weights = [max(0.0, float(trigger.get("weight", 0))) for trigger in valid_triggers]
         trigger = random.choices(valid_triggers, weights=weights if any(weights) else None, k=1)[0]
         delay = self._sample_duration(cfg.get("delay_seconds"), default=60)
+
         await self.short_memory.schedule(
             "follow_up",
             {
@@ -455,7 +459,6 @@ class ConversationService:
         return 1
 
     async def _follow_up_threshold(self, conversation_id, last_user_at, config) -> float:
-        """Keep a sampled threshold stable until the human messages again."""
         memory_key = f"persona:follow-up:threshold:{self.persona['id']}:{conversation_id}"
         last_user_key = last_user_at.isoformat()
         stored = await self.short_memory.get_json(memory_key)
@@ -468,30 +471,36 @@ class ConversationService:
             {"last_user_at": last_user_key, "idle_minutes": threshold},
             ttl=max(60, int(threshold * 120)),
         )
+
         return threshold
 
     @staticmethod
     def _minimum_duration(config, default: float) -> float:
         if isinstance(config, dict):
             return max(1.0, float(config.get("min", default)))
+
         if isinstance(config, (int, float)):
             return max(1.0, float(config))
+
         return default
 
     @staticmethod
     def _sample_duration(config, default: float) -> float:
         if isinstance(config, (int, float)):
             return max(1.0, float(config))
+
         if not isinstance(config, dict):
             return default
 
         minimum = max(1.0, float(config.get("min", default)))
         maximum = max(minimum, float(config.get("max", minimum)))
         mode = min(maximum, max(minimum, float(config.get("mode", (minimum + maximum) / 2))))
+
         return random.triangular(minimum, maximum, mode)
 
     def _local_now(self) -> datetime:
         timezone_name = self.persona.get("profile", {}).get("timezone", "UTC")
+
         try:
             return datetime.now(ZoneInfo(timezone_name))
         except ZoneInfoNotFoundError:

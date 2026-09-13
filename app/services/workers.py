@@ -90,10 +90,6 @@ async def worker_task(redis: Redis) -> None:
 
                     try:
                         if item_key == "presence_offline":
-                            # Legacy tasks may remain in Redis after an
-                            # upgrade. Presence is now exclusively owned by
-                            # life_tick, so an old reply timeout must not
-                            # overwrite the newer lifecycle state.
                             logger.info("[worker_task/presence_offline] Ignoring legacy presence timeout")
                             continue
 
