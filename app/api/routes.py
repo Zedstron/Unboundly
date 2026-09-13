@@ -3,8 +3,9 @@ import asyncio
 from redis.asyncio import Redis
 from app.core.logger import get_logger
 from app.domain.models import MessageIn
-from app.services.conversation import ConversationService
+from app.services.wppbridge import on_message
 from app.infrastructure.persona import PersonaStore
+from app.services.conversation import ConversationService
 from fastapi import APIRouter, Body, HTTPException, WebSocket, WebSocketDisconnect
 
 
@@ -39,6 +40,13 @@ def service(id: str) -> ConversationService:
 def services() -> list[ConversationService]:
     return list((_services or {}).values())
 
+@on_message
+async def new_whatsapp_message(persona, message):
+    chat_id = message.get("from")
+    text = message.get("body", "")
+
+    if chat_id and text:
+        await service(persona).ingest(chat_id, text)
 
 @router.get("/{pid}/persona")
 async def get_persona(pid: str):

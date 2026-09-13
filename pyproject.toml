@@ -16,8 +16,11 @@ dependencies = [
   "aiosqlite",
   "colorlog>=6.8",
   "pytest>=8.4",
+  "janus>=2.0,<3.0",
   "sqlalchemy",
-  "jinja2"
+  "jinja2",
+  "WPP_Whatsapp",
+  "tzdata"
 ]
 
 [project.optional-dependencies]

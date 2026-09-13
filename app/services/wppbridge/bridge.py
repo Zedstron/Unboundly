@@ -1,0 +1,317 @@
+from __future__ import annotations
+
+from dotenv import load_dotenv
+load_dotenv()
+
+import os
+import janus
+import asyncio
+import inspect
+import threading
+from pathlib import Path
+from WPP_Whatsapp import Create
+from dataclasses import dataclass
+from concurrent.futures import Future
+from app.core.logger import get_logger
+from typing import Any, Awaitable, Callable
+
+logger = get_logger("wppbridge")
+
+
+@dataclass(slots=True)
+class Command:
+    session: str
+    operation: str
+    args: tuple[Any, ...]
+    kwargs: dict[str, Any]
+    future: Future
+
+
+class AwaitableFuture:
+    def __init__(self, future: Future):
+        self._future = future
+
+    def result(self, timeout: float | None = None) -> Any:
+        return self._future.result(timeout)
+
+    def done(self) -> bool:
+        return self._future.done()
+
+    def __await__(self):
+        async def wait():
+            loop = asyncio.get_running_loop()
+            return await asyncio.wrap_future(self._future, loop=loop)
+
+        return wait().__await__()
+
+
+class Bridge:
+    def __init__(self):
+        self.session = os.getenv("WPPBRIDGE_SESSION", "wppbridge")
+        self.token_dir = os.getenv("WPPBRIDGE_TOKEN_DIR", os.path.join(os.getcwd(), "tokens"))
+        self.queue_size = int(os.getenv("WPPBRIDGE_QUEUE_SIZE", "1000"))
+        self.headless = os.getenv("WPPBRIDGE_HEADLESS", "0") == "1"
+
+        self._queue: janus.Queue[Command] = janus.Queue(
+            maxsize=self.queue_size
+        )
+        self._thread = threading.Thread(
+            target=self._run,
+            name="wppbridge",
+            daemon=True,
+        )
+        self._started = threading.Event()
+        self._ready = threading.Event()
+        self._stopped = threading.Event()
+        self._startup_error: BaseException | None = None
+
+        self._client = None
+        self._handlers: list[Callable[[dict[str, Any]], Any]] = []
+        self._handlers_lock = threading.RLock()
+
+        self._thread.start()
+        self._started.wait()
+
+    def signal(self, session, operation: str, *args: Any, **kwargs: Any) -> AwaitableFuture:
+        if self._stopped.is_set():
+            raise RuntimeError("wppbridge is stopped")
+
+        future: Future = Future()
+
+        command = Command(
+            session=session,
+            operation=operation,
+            args=args,
+            kwargs=kwargs,
+            future=future,
+        )
+
+        try:
+            self._queue.sync_q.put(command, block=True)
+        except BaseException as exc:
+            future.set_exception(exc)
+
+        return AwaitableFuture(future)
+
+    def on_message(self, handler: Callable[[dict[str, Any]], Any]) -> Callable[[], None]:
+        if not callable(handler):
+            raise TypeError("handler must be callable")
+
+        with self._handlers_lock:
+            self._handlers.append(handler)
+
+        return lambda: self._remove_handler(handler)
+
+    def _remove_handler(self, handler: Callable[[dict[str, Any]], Any]) -> None:
+        with self._handlers_lock:
+            if handler in self._handlers:
+                self._handlers.remove(handler)
+
+    def _run(self) -> None:
+        try:
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
+            self._started.set()
+            self._loop.run_until_complete(self._bootstrap())
+            self._loop.run_until_complete(self._worker())
+        except BaseException as exc:
+            self._startup_error = exc
+            self._started.set()
+            self._ready.set()
+            logger.exception("wppbridge stopped unexpectedly")
+        finally:
+            self._stopped.set()
+            try:
+                self._loop.close()
+            except Exception:
+                pass
+
+    async def _bootstrap(self) -> None:
+        Path(self.token_dir).mkdir(parents=True, exist_ok=True)
+
+        creator = Create(
+            session=self.session,
+            folderNameToken=self.token_dir,
+            waitForLogin=True,
+            logQR=True,
+            headless=self.headless,
+            no_viewport=True,
+            bypass_csp=True,
+            install=False
+        )
+
+        self._creator = creator
+
+        client = await asyncio.to_thread(creator.start)
+
+        if client is None:
+            raise RuntimeError("WPP_Whatsapp failed to create client")
+
+        self._client = client
+
+        client.onMessage(self._on_message)
+
+        self._ready.set()
+
+    async def _worker(self) -> None:
+        while True:
+            command = await self._queue.async_q.get()
+
+            try:
+                if command.operation == "__stop__":
+                    command.future.set_result(None)
+                    return
+
+                if not self._ready.is_set():
+                    await self._wait_ready()
+
+                result = await self._execute(command)
+
+                if not command.future.done():
+                    command.future.set_result(result)
+
+            except BaseException as exc:
+                if not command.future.done():
+                    command.future.set_exception(exc)
+
+                logger.exception("wppbridge operation failed: %s", command.operation)
+            finally:
+                self._queue.async_q.task_done()
+
+    async def _wait_ready(self) -> None:
+        while not self._ready.is_set():
+            if self._startup_error is not None:
+                raise RuntimeError("wppbridge failed to initialize") from self._startup_error
+
+            await asyncio.sleep(0.1)
+
+    async def _execute(self, command: Command) -> Any:
+        operation = command.operation
+        args = command.args
+        kwargs = command.kwargs
+
+        if operation == "send_message":
+            return await self._call(
+                self._client.sendText,
+                kwargs["to"],
+                kwargs["text"],
+                kwargs.get("options"),
+            )
+
+        if operation == "mark_seen":
+            return await self._call(
+                self._client.sendSeen,
+                kwargs["chat_id"],
+            )
+
+        if operation == "set_online":
+            return await self._call(
+                self._client.setOnlinePresence,
+                kwargs.get("online", True),
+            )
+
+        if operation == "send_attachment":
+            return await self._send_attachment(**kwargs)
+
+        if operation == "send_reaction":
+            return await self._send_reaction(**kwargs)
+
+        raise ValueError(f"unknown operation: {operation}")
+
+    async def _send_attachment(
+        self,
+        *,
+        to: str,
+        path: str,
+        caption: str = "",
+        filename: str | None = None,
+    ) -> Any:
+        file_path = Path(path)
+
+        if not file_path.exists():
+            raise FileNotFoundError(str(file_path))
+
+        name = filename or file_path.name
+
+        return await self._call(
+            self._client.sendFile,
+            to,
+            str(file_path),
+            name,
+            caption,
+        )
+
+    async def _send_reaction(self, *, message_id: str, reaction: str | bool) -> Any:
+        async def operation():
+            return await self._client.ThreadsafeBrowser.page_evaluate(
+                """({ messageId, reaction }) =>
+                    WPP.chat.sendReactionToMessage(messageId, reaction)
+                """,
+                {
+                    "messageId": message_id,
+                    "reaction": reaction,
+                },
+                page=self._client.page,
+            )
+
+        return await self._call(operation)
+
+    async def _call(self, function: Callable[..., Any], *args: Any) -> Any:
+        result = function(*args)
+
+        if inspect.isawaitable(result):
+            return await result
+
+        return result
+
+    def _on_message(self, message: dict[str, Any]) -> None:
+        with self._handlers_lock:
+            handlers = tuple(self._handlers)
+
+        for handler in handlers:
+            try:
+                result = handler(self.session, message)
+
+                if inspect.isawaitable(result):
+                    asyncio.create_task(self._run_handler(result))
+            except BaseException:
+                logger.exception("message handler failed")
+
+    async def _run_handler(self, result: Awaitable[Any]) -> None:
+        try:
+            await result
+        except BaseException:
+            logger.exception("async message handler failed")
+
+    def close(self) -> None:
+        if self._stopped.is_set():
+            return
+
+        future = Future()
+
+        self._queue.sync_q.put(
+            Command(
+                operation="__stop__",
+                args=(),
+                kwargs={},
+                future=future,
+            )
+        )
+
+        try:
+            future.result(timeout=10)
+        except Exception:
+            pass
+
+        self._stopped.set()
+
+
+_bridge = Bridge()
+
+
+def signal(session, operation: str, *args: Any, **kwargs: Any) -> AwaitableFuture:
+    return _bridge.signal(session, operation, *args, **kwargs)
+
+
+def on_message(handler: Callable[[str, dict[str, Any]], Any]) -> Callable[[], None]:
+    return _bridge.on_message(handler)

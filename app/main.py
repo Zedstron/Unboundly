@@ -16,6 +16,7 @@ logger = get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.debug("[app/lifespan] Application startup: initializing database")
+
     try:
         await init_db()
         logger.info("[app/lifespan] Database initialized successfully")

@@ -149,3 +149,4 @@ Thumbs.db
 # Project-specific
 conversations.db
 *.log
+tokens
