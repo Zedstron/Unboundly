@@ -135,29 +135,16 @@ async def worker_task(redis: Redis) -> None:
                         persona_id = payload["persona_id"]
                         conversation_id = payload["conversation_id"]
 
-                        if "reply" in item_key and payload.get("user_message_id") is not None:
-                            logger.debug(f"[worker_task/reply_pending] Marking message as seen: conversation_id={conversation_id}, user_message_id={payload['user_message_id']}")
-                            message_id = await mark_message_seen(conversation_id, payload["user_message_id"])
-
-                            if not message_id:
-                                logger.warning(f"[worker_task/reply_pending] Failed to mark message as seen: conversation_id={conversation_id}")
-                                continue
-
+                        if "reply" in item_key:
+                            user_mid = payload.get("user_message_id")
+                            logger.debug(f"[worker_task/reply] Marking conversation messages as seen: conversation_id={conversation_id}, user_message_id={user_mid}")
                             try:
-                                await bridge_signal(payload["persona_id"], "mark_seen", chat_id=conversation_id)
+                                await conversation_service.mark_conversation_seen(
+                                    conversation_id,
+                                    up_to_message_id=int(user_mid) if user_mid is not None else None,
+                                )
                             except Exception:
-                                logger.exception("Failed to mark WPP chat seen: conversation_id=%s", conversation_id)
-
-                            channel = f"persona:out:{payload['persona_id']}:{conversation_id}"
-                            logger.debug(f"[worker_task/reply_pending] Publishing seen status: channel={channel}, message_id={message_id}")
-                            
-                            await redis.publish(channel, json.dumps({
-                                "type": "status",
-                                "persona_id": payload["persona_id"],
-                                "conversation_id": conversation_id,
-                                "message_id": message_id,
-                                "status": "seen",
-                            }))
+                                logger.exception("Failed to mark conversation seen: conversation_id=%s", conversation_id)
 
                         if "text" not in payload:
                             logger.debug(f"[worker_task/reply] Generating reply for conversation_id={conversation_id}, persona_id={persona_id}")
@@ -178,6 +165,10 @@ async def worker_task(redis: Redis) -> None:
                         logger.debug(f"[worker_task/reply] Saving bot message: persona_id={persona_id}, conversation_id={conversation_id}, text_length={len(payload['text'])}")
                         bot_message_id = await save_message(payload['persona_id'], conversation_id, 'bot', payload["text"], 'seen')
                         logger.info(f"[worker_task/reply] Bot message saved: message_id={bot_message_id}, conversation_id={conversation_id}")
+                        try:
+                            await conversation_service.mark_conversation_seen(conversation_id)
+                        except Exception:
+                            logger.exception("Failed to mark conversation seen after bot reply: conversation_id=%s", conversation_id)
 
                         try:
                             result = await bridge_signal(payload["persona_id"], "send_message", to=conversation_id, text=payload["text"])

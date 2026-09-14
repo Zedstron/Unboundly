@@ -35,10 +35,17 @@ function saveHiddenPersonaIds(ids) {
     localStorage.setItem(hiddenPersonasKey, JSON.stringify([...ids]));
 }
 
+const STATUS_RANK = {
+    'not-delivered': 0,
+    'sent': 1,
+    'delivered': 2,
+    'seen': 3
+};
+
 const TICK_SVG = {
     sent: `<span class="tick-icon sent" aria-label="sent"><svg viewBox="0 0 16 11" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M10.9 1.2c-.2-.2-.4-.3-.6-.3s-.4.1-.5.3L3.4 9.3 1.3 7.2c-.1-.1-.3-.2-.5-.2s-.3.1-.4.2l-.3.3c-.1.1-.2.3-.2.4s.1.3.2.4l2.6 2.6c.1.1.3.2.4.2h.1c.2 0 .3-.1.4-.2l6-7.4c.1-.1.2-.3.1-.4 0-.2-.1-.3-.2-.4L10.9 1.2z"/></svg></span>`,
-    delivered: `<span class="tick-icon delivered" aria-label="delivered"><svg viewBox="0 0 16 11" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M11.6 1.2c-.2-.2-.4-.3-.6-.3s-.4.1-.5.3L4.1 9.3 2 7.2c-.1-.1-.3-.2-.5-.2s-.3.1-.4.2l-.3.3c-.1.1-.2.3-.2.4s.1.3.2.4l2.6 2.6c.1.1.3.2.4.2h.1c.2 0 .3-.1.4-.2l6-7.4c.1-.1.2-.3.1-.4 0-.2-.1-.3-.2-.4L11.6 1.2zM15.9 1.2c-.2-.2-.4-.3-.6-.3s-.4.1-.5.3l-6.4 8.1-1-1c-.1-.1-.3-.2-.5-.2s-.3.1-.4.2l-.3.3c-.1.1-.2.3-.2.4s.1.3.2.4l1.5 1.5c.1.1.3.2.4.2h.1c.2 0 .3-.1.4-.2l6-7.4c.1-.1.2-.3.1-.4 0-.2-.1-.3-.2-.4L15.9 1.2z"/></svg></span>`,
-    seen: `<span class="tick-icon seen" aria-label="seen"><svg viewBox="0 0 16 11" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M11.6 1.2c-.2-.2-.4-.3-.6-.3s-.4.1-.5.3L4.1 9.3 2 7.2c-.1-.1-.3-.2-.5-.2s-.3.1-.4.2l-.3.3c-.1.1-.2.3-.2.4s.1.3.2.4l2.6 2.6c.1.1.3.2.4.2h.1c.2 0 .3-.1.4-.2l6-7.4c.1-.1.2-.3.1-.4 0-.2-.1-.3-.2-.4L11.6 1.2zM15.9 1.2c-.2-.2-.4-.3-.6-.3s-.4.1-.5.3l-6.4 8.1-1-1c-.1-.1-.3-.2-.5-.2s-.3.1-.4.2l-.3.3c-.1.1-.2.3-.2.4s.1.3.2.4l1.5 1.5c.1.1.3.2.4.2h.1c.2 0 .3-.1.4-.2l6-7.4c.1-.1.2-.3.1-.4 0-.2-.1-.3-.2-.4L15.9 1.2z"/></svg></span>`,
+    delivered: `<span class="tick-icon delivered" aria-label="delivered"><svg viewBox="0 0 16 11" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M11.6 1.2c-.2-.2-.4-.3-.6-.3s-.4.1-.5.3L4.1 9.3 2 7.2c-.1-.1-.3-.2-.5-.2s-.3.1-.4.2l-.3.3c-.1.1-.2.3-.2.4s.1.3.2.4l2.6 2.6c.1.1.3.2.4.2h.1c.2 0 .3-.1.4-.2l6-7.4c.1-.1.2-.3.1-.4 0-.2-.1-.3-.2-.4L11.6 1.2zM15.9 1.2c-.2-.2-.4-.3-.6-.3s-.4.1-.5.3l-6.4 8.1-1-1c-.1-.1-.3-.2-.5-.2s-.3.1-.4.2l-.3.3c-.1.1-.2.3-.2.4s.1.3.2.4l1.5 1.5c.1.1.3.2.4.2h.1c.2 0 .3-.1.4-.2l6-7.4c.1-.1.2-.3.1-.4 0-.2-.1-.3-.2-.4L15.9 1.2z\"/></svg></span>`,
+    seen: `<span class="tick-icon seen" aria-label="seen"><svg viewBox="0 0 16 11" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M11.6 1.2c-.2-.2-.4-.3-.6-.3s-.4.1-.5.3L4.1 9.3 2 7.2c-.1-.1-.3-.2-.5-.2s-.3.1-.4.2l-.3.3c-.1.1-.2.3-.2.4s.1.3.2.4l2.6 2.6c.1.1.3.2.4.2h.1c.2 0 .3-.1.4-.2l6-7.4c.1-.1.2-.3.1-.4 0-.2-.1-.3-.2-.4L11.6 1.2zM15.9 1.2c-.2-.2-.4-.3-.6-.3s-.4.1-.5.3l-6.4 8.1-1-1c-.1-.1-.3-.2-.5-.2s-.3.1-.4.2l-.3.3c-.1.1-.2.3-.2.4s.1.3.2.4l1.5 1.5c.1.1.3.2.4.2h.1c.2 0 .3-.1.4-.2l6-7.4c.1-.1.2-.3.1-.4 0-.2-.1-.3-.2-.4L15.9 1.2z\"/></svg></span>`,
     'not-delivered': `<span class="tick-icon not-delivered" aria-label="not delivered"><svg viewBox="0 0 16 11" xmlns="http://www.w3.org/2000/svg"><path fill="currentColor" d="M10.9 1.2c-.2-.2-.4-.3-.6-.3s-.4.1-.5.3L3.4 9.3 1.3 7.2c-.1-.1-.3-.2-.5-.2s-.3.1-.4.2l-.3.3c-.1.1-.2.3-.2.4s.1.3.2.4l2.6 2.6c.1.1.3.2.4.2h.1c.2 0 .3-.1.4-.2l6-7.4c.1-.1.2-.3.1-.4 0-.2-.1-.3-.2-.4L10.9 1.2z"/><circle cx="14.5" cy="9" r="1.5" fill="#ef4444"/></svg></span>`
 };
 
@@ -92,11 +99,55 @@ function generateAvatar(name) {
     return `data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='49' height='49'%3E%3Crect width='49' height='49' rx='25' fill='${encodeURIComponent(color)}'/%3E%3Ctext x='50%25' y='54%25' dominant-baseline='middle' text-anchor='middle' fill='white' font-size='22' font-family='Segoe UI,sans-serif' font-weight='500'%3E${initial}%3C/text%3E%3C/svg%3E`;
 }
 
+function markAllUserMessagesSeen() {
+    messagesBox.querySelectorAll('.msg.user').forEach(msgEl => {
+        const tick = msgEl.querySelector('.tick-icon');
+        if (tick && !tick.classList.contains('seen')) {
+            tick.outerHTML = TICK_SVG.seen;
+        }
+        const mid = msgEl.dataset.messageId;
+        if (mid && messageTickMap.has(String(mid))) {
+            messageTickMap.get(String(mid)).status = 'seen';
+        }
+    });
+    if (personaId) {
+        updateConvTickStatus(personaId, 'seen');
+    }
+}
+
+function markUserMessagesSeenUpTo(messageId) {
+    if (messageId != null) {
+        const userMsgs = [...messagesBox.querySelectorAll('.msg.user')];
+        const targetIndex = userMsgs.findIndex(el => el.dataset.messageId === String(messageId));
+        if (targetIndex !== -1) {
+            for (let i = 0; i <= targetIndex; i++) {
+                const el = userMsgs[i];
+                const tick = el.querySelector('.tick-icon');
+                if (tick && !tick.classList.contains('seen')) {
+                    tick.outerHTML = TICK_SVG.seen;
+                }
+                const mid = el.dataset.messageId;
+                if (mid && messageTickMap.has(String(mid))) {
+                    messageTickMap.get(String(mid)).status = 'seen';
+                }
+            }
+            if (personaId) {
+                updateConvTickStatus(personaId, 'seen');
+            }
+            return;
+        }
+    }
+    markAllUserMessagesSeen();
+}
+
 function toggleTyping(flag, isCurrentPersona) {
     if (!isCurrentPersona) return;
     if (typingEl) {
         typingEl.classList.toggle('active', !!flag);
-        if (flag) messagesBox.scrollTop = messagesBox.scrollHeight;
+        if (flag) {
+            markAllUserMessagesSeen();
+            messagesBox.scrollTop = messagesBox.scrollHeight;
+        }
     }
 }
 
@@ -506,13 +557,22 @@ function connectWebSocket() {
                     if (pid === personaId) {
                         addMessage(message.text, 'bot', 'seen', message.created_at, message.message_id);
                         updateConvLastMessage(pid, message.text, 'bot');
+                        markAllUserMessagesSeen();
                     } else {
                         updateConvLastMessage(pid, message.text, 'bot');
+                        updateConvTickStatus(pid, 'seen');
                     }
                 } else if (message.type === "status") {
-                    updateMessageStatus(message.message_id, message.status);
+                    updateMessageStatus(message.message_id, message.status, pid);
                 } else if (message.type === "typing") {
                     toggleTyping(message.flag, pid === personaId);
+                    if (message.flag) {
+                        if (pid === personaId) {
+                            markAllUserMessagesSeen();
+                        } else {
+                            updateConvTickStatus(pid, 'seen');
+                        }
+                    }
                 } else if (message.type === "online") {
                     toggleOnline(pid, message.flag);
                 } else if (message.type === "presence") {

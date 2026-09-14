@@ -91,6 +91,26 @@ class ShortTermMemory:
         await self.set_json(f"persona:presence:{persona_id}", presence)
 
     async def publish_typing(self, persona_id: str, conversation_id: str, flag: bool) -> None:
+        if flag:
+            try:
+                from app.infrastructure.sqlite import mark_messages_seen
+                seen_ids = await mark_messages_seen(conversation_id, persona_id=persona_id)
+                if seen_ids:
+                    channel = f"persona:out:{persona_id}:{conversation_id}"
+                    for mid in seen_ids:
+                        await self.redis.publish(
+                            channel,
+                            json.dumps({
+                                "type": "status",
+                                "persona_id": persona_id,
+                                "conversation_id": conversation_id,
+                                "message_id": mid,
+                                "status": "seen",
+                            }),
+                        )
+            except Exception:
+                pass
+
         await self.redis.publish(
             f"persona:out:{persona_id}:{conversation_id}",
             json.dumps({

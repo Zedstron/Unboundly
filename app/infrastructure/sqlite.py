@@ -106,24 +106,66 @@ async def set_external_id(message_id: int, source: str, external_id: str) -> boo
         return True
 
 
-async def mark_message_seen(conversation_id: str, message_id: str) -> int:
+async def mark_messages_seen(
+    conversation_id: str,
+    persona_id: str | None = None,
+    up_to_message_id: int | None = None,
+) -> list[int]:
+    """Mark unread user messages as seen for a conversation.
+
+    If up_to_message_id is provided, only messages with id <= up_to_message_id
+    are marked. Otherwise all unread user messages in the conversation are marked.
+    Returns the list of message IDs that were transitioned to 'seen'.
+    """
     async with SessionFactory() as session:
-        result = await session.execute(
-            select(ConversationMessage)
-            .where(
-                ConversationMessage.conversation_id == conversation_id,
-                ConversationMessage.id == message_id
-            )
+        query = select(ConversationMessage).where(
+            ConversationMessage.conversation_id == conversation_id,
+            ConversationMessage.direction == "user",
+            ConversationMessage.status != "seen",
         )
+        if persona_id is not None:
+            query = query.where(ConversationMessage.persona_id == persona_id)
+        if up_to_message_id is not None:
+            query = query.where(ConversationMessage.id <= up_to_message_id)
 
-        message = result.scalars().first()
-        if message is None:
-            return 0
+        query = query.order_by(ConversationMessage.id.asc())
+        result = await session.execute(query)
+        messages = result.scalars().all()
+        if not messages:
+            return []
 
-        message.status = "seen"
+        updated_ids = []
+        for message in messages:
+            message.status = "seen"
+            updated_ids.append(message.id)
 
         await session.commit()
-        return message.id
+        return updated_ids
+
+
+async def mark_message_seen(conversation_id: str, message_id: str | int) -> int:
+    try:
+        mid = int(message_id)
+    except (ValueError, TypeError):
+        mid = None
+
+    updated = await mark_messages_seen(conversation_id, up_to_message_id=mid)
+    if mid is not None and mid in updated:
+        return mid
+    if updated:
+        return updated[-1]
+    if mid is not None:
+        async with SessionFactory() as session:
+            result = await session.execute(
+                select(ConversationMessage.id).where(
+                    ConversationMessage.conversation_id == conversation_id,
+                    ConversationMessage.id == mid,
+                )
+            )
+            found = result.scalars().first()
+            if found is not None:
+                return found
+    return 0
 
 
 async def get_unread_user_messages(persona_id: str) -> list[dict]:
@@ -178,24 +220,28 @@ async def mark_message_seen_for_persona(
     conversation_id: str,
     message_id: int,
 ) -> int:
+    updated = await mark_messages_seen(
+        conversation_id,
+        persona_id=persona_id,
+        up_to_message_id=message_id,
+    )
+    if message_id in updated:
+        return message_id
+    if updated:
+        return updated[-1]
     async with SessionFactory() as session:
         result = await session.execute(
-            select(ConversationMessage)
-            .where(
+            select(ConversationMessage.id).where(
                 ConversationMessage.persona_id == persona_id,
                 ConversationMessage.conversation_id == conversation_id,
                 ConversationMessage.id == message_id,
                 ConversationMessage.direction == "user",
-                ConversationMessage.status == "delivered",
             )
         )
-        message = result.scalars().first()
-        if message is None:
-            return 0
-
-        message.status = "seen"
-        await session.commit()
-        return message.id
+        found = result.scalars().first()
+        if found is not None:
+            return found
+    return 0
 
 
 async def get_conversation(persona_id: str, conversation_id: str, limit: int | None = None) -> list[dict]:
