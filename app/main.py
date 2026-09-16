@@ -34,7 +34,7 @@ async def lifespan(app: FastAPI):
 
     logger.debug("[app/lifespan] Initializing conversation services")
     try:
-        init_services(redis)
+        await init_services(redis)
         logger.info("[app/lifespan] Conversation services initialized")
     except Exception as e:
         logger.error(f"[app/lifespan] Failed to initialize services: {e}", exc_info=True)

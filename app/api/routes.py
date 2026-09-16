@@ -15,17 +15,22 @@ _services: dict[str: ConversationService] | None = {}
 _redis: Redis | None = None
 
 
-def init_services(redis: Redis) -> None:
+async def init_services(redis: Redis) -> None:
     global _services, _redis
     _redis = redis
 
     store = PersonaStore()
-    logger.info(f"[init_services] Initializing services for {len(store.available_personas())} personas")
+    personas = store.available_personas()
+    logger.info(f"[init_services] Initializing services for {len(personas)} personas")
 
-    for persona in store.available_personas():
+    for persona in personas:
         personality = store.get_persona(persona["id"])
-        _services[persona["id"]] = ConversationService(personality, redis)
-        logger.debug(f"[init_services] Service initialized for persona_id={persona['id']}")
+        srv = ConversationService(personality, redis)
+        state = await srv.load_state()
+        _services[persona["id"]] = srv
+        logger.info(
+            f"[init_services] Service initialized and resumed mood state for persona_id={persona['id']}: {state.values}"
+        )
 
 def service(id: str) -> ConversationService:
     if not _services:
@@ -76,6 +81,56 @@ async def update_persona(pid: str, payload: dict = Body(...)):
         raise HTTPException(404, detail="Persona not found") from exc
     except ValueError as exc:
         logger.error(f"[update_persona] Validation error for persona: pid={pid}, error={exc}")
+        raise HTTPException(400, detail=str(exc)) from exc
+
+
+@router.get("/{pid}/state")
+async def get_persona_state(pid: str):
+    logger.debug(f"[get_persona_state] Fetching state for persona_id={pid}")
+    try:
+        current_service = service(pid)
+        return await current_service.get_state()
+    except Exception as exc:
+        logger.error(f"[get_persona_state] Error fetching state for persona_id={pid}: {exc}", exc_info=True)
+        raise HTTPException(502, detail=str(exc)) from exc
+
+
+@router.post("/{pid}/state/reset")
+@router.delete("/{pid}/state")
+@router.post("/{pid}/reset-state")
+async def reset_persona_state_endpoint(pid: str):
+    logger.info(f"[reset_persona_state] Resetting state for persona_id={pid}")
+    try:
+        current_service = service(pid)
+        new_state = await current_service.reset_state()
+        return {
+            "status": "reset",
+            "persona_id": pid,
+            "mood": new_state.values,
+            "updated_at": new_state.updated_at.isoformat(),
+        }
+    except Exception as exc:
+        logger.error(f"[reset_persona_state] Error resetting state for persona_id={pid}: {exc}", exc_info=True)
+        raise HTTPException(502, detail=str(exc)) from exc
+
+
+@router.put("/{pid}/state")
+async def update_persona_state_endpoint(pid: str, payload: dict = Body(...)):
+    logger.info(f"[update_persona_state] Updating state for persona_id={pid}")
+    try:
+        current_service = service(pid)
+        mood_values = payload.get("mood", payload)
+        if not isinstance(mood_values, dict):
+            raise ValueError("Mood values must be a dictionary")
+        new_state = await current_service.set_mood(mood_values)
+        return {
+            "status": "updated",
+            "persona_id": pid,
+            "mood": new_state.values,
+            "updated_at": new_state.updated_at.isoformat(),
+        }
+    except Exception as exc:
+        logger.error(f"[update_persona_state] Error updating state for persona_id={pid}: {exc}", exc_info=True)
         raise HTTPException(400, detail=str(exc)) from exc
 
 
@@ -273,8 +328,9 @@ async def get_personas(conversation_id: str):
         for p in personas:
             p["last_message"] = await service(p["id"]).get_last_message(conversation_id)
             p["presence"] = await service(p["id"]).get_presence()
+            p["mood"] = (await service(p["id"]).get_state())["mood"]
         
-        logger.debug(f"[get_personas] Successfully enriched {len(personas)} personas with presence and messages")
+        logger.debug(f"[get_personas] Successfully enriched {len(personas)} personas with presence, messages and mood")
         return personas
     except Exception as exc:
         logger.error(f"[get_personas] Error fetching personas: conversation_id={conversation_id}, error={exc}", exc_info=True)

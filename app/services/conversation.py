@@ -1,5 +1,6 @@
 import json
 import random
+from typing import Any
 from time import time
 import time as time_module
 from app.core.logger import get_logger
@@ -22,6 +23,9 @@ from app.infrastructure.sqlite import (
     mark_message_seen_for_persona,
     mark_messages_seen,
     save_message,
+    save_persona_state,
+    get_persona_state as get_persona_state_db,
+    reset_persona_state as reset_persona_state_db,
 )
 
 logger = get_logger(__name__)
@@ -37,6 +41,7 @@ class ConversationService:
         self.agent = PersonaAgentGraph(persona, redis)
 
         self.states: dict[str, MoodState] = {}
+        self.current_state: MoodState | None = None
 
         logger.debug(f"[ConversationService.__init__] Initialized service for {persona.get('profile', {}).get('name', 'unknown')}")
 
@@ -220,23 +225,116 @@ class ConversationService:
             raise
 
     async def _load_state(self) -> MoodState:
-        stored = await self.short_memory.get_persona_state(self.persona["id"])
-        if stored:
-            return MoodState(
-                values={key: float(value) for key, value in stored["mood"].items()},
-                updated_at=datetime.fromisoformat(stored["updated_at"]),
-            )
+        # 1. Primary persistent source: SQLite
+        try:
+            db_state = await get_persona_state_db(self.persona["id"])
+            if db_state:
+                baseline = self.persona.get("mood", {}).get("baseline", {})
+                values = {**baseline, **db_state["mood"]}
+                state = MoodState(values=values, updated_at=db_state["updated_at"])
+                self.current_state = state
+                try:
+                    await self.short_memory.set_persona_state(
+                        self.persona["id"],
+                        {
+                            "mood": state.values,
+                            "updated_at": state.updated_at.isoformat(),
+                        },
+                    )
+                except Exception:
+                    pass
+                return state
+        except Exception as e:
+            logger.warning(f"[ConversationService._load_state] Failed to load state from SQLite for persona_id={self.persona['id']}: {e}")
 
-        return MoodState(dict(self.persona["mood"]["baseline"]), datetime.now(timezone.utc))
+        # 2. Fallback: check Redis in case migrating
+        try:
+            stored = await self.short_memory.get_persona_state(self.persona["id"])
+            if stored:
+                baseline = self.persona.get("mood", {}).get("baseline", {})
+                stored_mood = {key: float(value) for key, value in stored.get("mood", {}).items()}
+                values = {**baseline, **stored_mood}
+                updated_at = datetime.fromisoformat(stored["updated_at"])
+                if updated_at.tzinfo is None:
+                    updated_at = updated_at.replace(tzinfo=timezone.utc)
+                state = MoodState(values=values, updated_at=updated_at)
+                self.current_state = state
+                try:
+                    await save_persona_state(self.persona["id"], state.values, state.updated_at)
+                except Exception:
+                    pass
+                return state
+        except Exception as e:
+            logger.warning(f"[ConversationService._load_state] Failed to load state from Redis for persona_id={self.persona['id']}: {e}")
+
+        # 3. Default: initialize from baseline
+        state = MoodState(dict(self.persona["mood"]["baseline"]), datetime.now(timezone.utc))
+        self.current_state = state
+        return state
 
     async def _save_state(self, state: MoodState) -> None:
-        await self.short_memory.set_persona_state(
-            self.persona["id"],
-            { 
-                "mood": state.values,
-                "updated_at": state.updated_at.isoformat()
-            }
-        )
+        self.current_state = state
+        try:
+            await save_persona_state(
+                self.persona["id"],
+                state.values,
+                state.updated_at,
+            )
+        except Exception as e:
+            logger.error(f"[ConversationService._save_state] Failed to save state to SQLite for persona_id={self.persona['id']}: {e}")
+
+        try:
+            await self.short_memory.set_persona_state(
+                self.persona["id"],
+                { 
+                    "mood": state.values,
+                    "updated_at": state.updated_at.isoformat()
+                }
+            )
+        except Exception as e:
+            logger.warning(f"[ConversationService._save_state] Failed to save state to Redis for persona_id={self.persona['id']}: {e}")
+
+    async def load_state(self) -> MoodState:
+        """Explicitly resume/load persona mood state from persistent storage."""
+        return await self._load_state()
+
+    async def reset_state(self) -> MoodState:
+        """Reset persona mood/internal state back to baseline in SQLite, Redis, and memory."""
+        try:
+            await reset_persona_state_db(self.persona["id"])
+        except Exception as e:
+            logger.error(f"[ConversationService.reset_state] Error resetting state in SQLite: {e}")
+
+        try:
+            await self.short_memory.delete_persona_state(self.persona["id"])
+        except Exception as e:
+            logger.warning(f"[ConversationService.reset_state] Error deleting state from Redis: {e}")
+
+        baseline = dict(self.persona.get("mood", {}).get("baseline", {}))
+        self.current_state = MoodState(baseline, datetime.now(timezone.utc))
+        self.states.clear()
+        logger.info(f"[ConversationService.reset_state] Mood state reset to baseline for persona_id={self.persona['id']}")
+        return self.current_state
+
+    async def set_mood(self, mood_values: dict[str, float]) -> MoodState:
+        """Manually update or override specific mood dimensions."""
+        current = self.current_state or await self._load_state()
+        new_values = dict(current.values)
+        for k, v in mood_values.items():
+            new_values[k] = float(v)
+        new_state = MoodState(new_values, datetime.now(timezone.utc))
+        await self._save_state(new_state)
+        return new_state
+
+    async def get_state(self) -> dict[str, Any]:
+        """Return the current mood/internal state including metadata and baseline."""
+        state = self.current_state or await self._load_state()
+        return {
+            "persona_id": self.persona["id"],
+            "mood": state.values,
+            "updated_at": state.updated_at.isoformat(),
+            "baseline": self.persona.get("mood", {}).get("baseline", {}),
+        }
 
     async def life_tick(self) -> dict:
         logger.debug(f"[ConversationService.life_tick] Running life_tick for persona_id={self.persona['id']}")

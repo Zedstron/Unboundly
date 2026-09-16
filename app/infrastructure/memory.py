@@ -84,6 +84,9 @@ class ShortTermMemory:
     async def set_persona_state(self, persona_id: str, state: dict[str, Any]) -> None:
         await self.set_json(f"persona:state:{persona_id}", state)
 
+    async def delete_persona_state(self, persona_id: str) -> None:
+        await self.redis.delete(f"persona:state:{persona_id}")
+
     async def get_presence(self, persona_id: str) -> dict[str, Any] | None:
         return await self.get_json(f"persona:presence:{persona_id}")
 

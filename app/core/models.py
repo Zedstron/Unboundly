@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import DateTime, Integer, String, Text, Index
+from sqlalchemy import DateTime, Integer, String, Text, Index, JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 class Base(DeclarativeBase):
@@ -29,3 +29,15 @@ class ConversationMessage(Base):
 
 
 Index("ix_conversation_messages_external", "source", "external_id")
+
+
+class PersonaState(Base):
+    __tablename__ = "persona_states"
+
+    persona_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    mood: Mapped[dict] = mapped_column(JSON, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )

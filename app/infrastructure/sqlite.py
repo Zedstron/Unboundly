@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import (
@@ -9,7 +10,7 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from app.core.models import ConversationMessage, Base
+from app.core.models import ConversationMessage, PersonaState, Base
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 
@@ -310,3 +311,77 @@ async def get_last_message(persona_id: str, conversation_id: str) -> dict:
         )
 
         return result.scalars().first()
+
+
+async def save_persona_state(
+    persona_id: str,
+    mood: dict[str, float],
+    updated_at: datetime | None = None,
+) -> None:
+    if updated_at is None:
+        updated_at = datetime.now(timezone.utc)
+    elif updated_at.tzinfo is None:
+        updated_at = updated_at.replace(tzinfo=timezone.utc)
+
+    async with SessionFactory() as session:
+        result = await session.execute(
+            select(PersonaState).where(PersonaState.persona_id == persona_id).limit(1)
+        )
+        state_row = result.scalars().first()
+        if state_row is None:
+            state_row = PersonaState(
+                persona_id=persona_id,
+                mood=mood,
+                updated_at=updated_at,
+            )
+            session.add(state_row)
+        else:
+            state_row.mood = mood
+            state_row.updated_at = updated_at
+        await session.commit()
+
+
+async def get_persona_state(persona_id: str) -> dict[str, Any] | None:
+    async with SessionFactory() as session:
+        result = await session.execute(
+            select(PersonaState).where(PersonaState.persona_id == persona_id).limit(1)
+        )
+        state_row = result.scalars().first()
+        if state_row is None:
+            return None
+
+        updated_at = state_row.updated_at
+        if updated_at.tzinfo is None:
+            updated_at = updated_at.replace(tzinfo=timezone.utc)
+
+        return {
+            "persona_id": state_row.persona_id,
+            "mood": {str(k): float(v) for k, v in state_row.mood.items()},
+            "updated_at": updated_at,
+        }
+
+
+async def reset_persona_state(persona_id: str) -> bool:
+    async with SessionFactory() as session:
+        result = await session.execute(
+            delete(PersonaState).where(PersonaState.persona_id == persona_id)
+        )
+        await session.commit()
+        return result.rowcount > 0
+
+
+async def get_all_persona_states() -> list[dict[str, Any]]:
+    async with SessionFactory() as session:
+        result = await session.execute(select(PersonaState))
+        rows = result.scalars().all()
+        states = []
+        for r in rows:
+            updated_at = r.updated_at
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            states.append({
+                "persona_id": r.persona_id,
+                "mood": {str(k): float(v) for k, v in r.mood.items()},
+                "updated_at": updated_at,
+            })
+        return states
