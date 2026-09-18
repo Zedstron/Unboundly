@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi.staticfiles import StaticFiles
 from app.services.workers import worker_task
 from app.infrastructure.sqlite import init_db
+from app.infrastructure.mcp import registry as mcp_registry
 from app.web.routes import router as web_router
 from app.api.routes import router as api_router, init_services
 
@@ -23,6 +24,19 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"[app/lifespan] Database initialization failed: {e}", exc_info=True)
         raise
+
+    logger.debug("[app/lifespan] Connecting to MCP remote servers")
+    try:
+        await mcp_registry.connect()
+        if mcp_registry.has_tools:
+            logger.info(
+                "[app/lifespan] MCP tools available: %s",
+                mcp_registry.get_tool_names(),
+            )
+        else:
+            logger.info("[app/lifespan] No MCP tools configured — running without tool use")
+    except Exception as e:
+        logger.error(f"[app/lifespan] MCP registry connect failed: {e}", exc_info=True)
 
     logger.debug(f"[app/lifespan] Connecting to Redis: {settings.redis_url}")
     try:
@@ -67,7 +81,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.warning(f"[app/lifespan] Error closing Redis: {e}")
 
+    logger.debug("[app/lifespan] Closing MCP connections")
+    try:
+        await mcp_registry.close()
+    except Exception as e:
+        logger.warning(f"[app/lifespan] Error closing MCP registry: {e}")
+
     logger.info("[app/lifespan] Application shutdown complete")
+
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent

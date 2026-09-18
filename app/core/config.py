@@ -13,6 +13,11 @@ class Settings(BaseSettings):
     logging_enabled: bool = True
     log_level: str = "INFO"
     log_file_path: str = None
+    mcp_server_urls: str = ""
+
+    @property
+    def mcp_server_url_list(self) -> list[str]:
+        return [ u.strip() for u in self.mcp_server_urls.split(",") if u.strip() ]
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

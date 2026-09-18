@@ -9,6 +9,7 @@ def get_prompt(prompt_type, kwargs):
         short_memories = params.get("short_memories", "")
         long_memories = params.get("long_memories", "")
         language_style = params.get("language_style", "")
+        tools_block = params.get("tools_block", "")
 
         return """
 You are simulating a specific real person, not an AI assistant.
@@ -228,7 +229,7 @@ Use:
 - "long" for durable information
 
 When uncertain whether something is worth remembering, do not save it.
-
+{tools_block}
 OUTPUT
 
 Return ONLY valid JSON matching exactly this structure:
@@ -258,6 +259,7 @@ Do not put explanations, analysis, mood values, reasoning, or meta-commentary an
             short_memories=short_memories,
             long_memories=long_memories,
             language_style=language_style,
+            tools_block=tools_block,
         ).strip()
 
     if prompt_type == "event_classification":
@@ -284,5 +286,29 @@ Rules:
             text=text,
             allowed_events=allowed_events_text,
         ).strip()
+
+    if prompt_type == "tools_context":
+        tools: list[dict] = params.get("tools", [])
+        if not tools:
+            return ""
+
+        lines = [
+            "\nAVAILABLE TOOLS\n",
+            "You have access to the following external tools via function calling.\n",
+            "Use a tool when the user's request clearly benefits from real-time or",
+            "external information that you cannot reliably provide from memory.\n",
+            "Do NOT call tools speculatively or to appear helpful.",
+            "Tools:",
+        ]
+        for tool in tools:
+            name = tool.get("name", "")
+            desc = tool.get("description", "").strip()
+            lines.append(f"  \u2022 {name} \u2014 {desc}")
+
+        lines.append(
+            "\nAfter receiving a tool result, incorporate it naturally into your reply "
+            "as the persona would \u2014 do not announce that you called a tool.\n"
+        )
+        return "\n".join(lines)
 
     raise ValueError(f"Unsupported prompt type: {prompt_type}")

@@ -7,6 +7,9 @@ from app.domain.models import AgentResponse
 
 logger = get_logger(__name__)
 
+_MAX_TOOL_ITERATIONS = 17
+
+
 class AIProvider:
     def __init__(
         self,
@@ -35,11 +38,13 @@ class AIProvider:
         self.embedding_model = embedding_model or model
         logger.debug("[OpenAICompatibleAI.__init__] Initialized AI service: model=%s", model)
 
+
     async def chat(self, messages: Sequence[dict[str, str]], *, temperature: float = 0.8) -> AgentResponse:
         logger.debug(f"[OpenAICompatibleAI.chat] Chat API call started: num_messages={len(messages)}, temperature={temperature}, model={self.model}")
         try:
             schema = AgentResponse.model_json_schema()
             schema["additionalProperties"] = False
+
             for definition in schema.get("$defs", {}).values():
                 definition["additionalProperties"] = False
 
@@ -74,6 +79,110 @@ class AIProvider:
         except Exception as e:
             logger.error(f"[OpenAICompatibleAI.chat] Error calling chat API: {e}", exc_info=True)
             raise
+
+
+    async def chat_with_tools(
+        self,
+        messages: Sequence[dict],
+        tools: list[dict],
+        *,
+        temperature: float = 0.8,
+        mcp_registry=None,
+    ) -> AgentResponse:
+
+        from app.infrastructure.mcp import registry as _default_registry
+
+        mcp = mcp_registry or _default_registry
+        conversation: list[dict] = list(messages)
+
+        logger.debug("[AIProvider.chat_with_tools] Starting tool-use loop: %d message(s), %d tool(s)", len(conversation), len(tools))
+
+        for iteration in range(_MAX_TOOL_ITERATIONS):
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=conversation,
+                tools=tools if tools else None,
+                tool_choice="auto" if tools else None,
+                temperature=temperature,
+            )
+
+            choice = response.choices[0]
+            msg = choice.message
+
+            if not msg.tool_calls:
+                content = msg.content or ""
+                logger.debug("[AIProvider.chat_with_tools] Final reply after %d iteration(s): %.120s", iteration + 1, content)
+
+                try:
+                    return AgentResponse.model_validate(json.loads(content))
+                except Exception:
+                    return AgentResponse(response=content, memories=[])
+
+            conversation.append({
+                "role": "assistant",
+                "content": msg.content,
+                "tool_calls": [
+                    {
+                        "id": tc.id,
+                        "type": "function",
+                        "function": {
+                            "name": tc.function.name,
+                            "arguments": tc.function.arguments
+                        }
+                    }
+                    for tc in msg.tool_calls
+                ]
+            })
+
+            for tc in msg.tool_calls:
+                tool_name = tc.function.name
+                try:
+                    raw_args = tc.function.arguments or "{}"
+                    arguments = json.loads(raw_args)
+                except json.JSONDecodeError:
+                    arguments = {}
+
+                logger.info(
+                    "\n╔══════════════════════════════════════════════════════╗"
+                    "\n║  🔧 TOOL CALL  [iter %d/%d]"
+                    "\n║  Name : %s"
+                    "\n║  Args : %s"
+                    "\n╚══════════════════════════════════════════════════════╝",
+                    iteration + 1,
+                    _MAX_TOOL_ITERATIONS,
+                    tool_name,
+                    json.dumps(arguments, ensure_ascii=False)
+                )
+
+                try:
+                    result_text = await mcp.call_tool(tool_name, arguments)
+                except Exception as exc:
+                    result_text = f"[Tool error] {exc}"
+                    logger.warning("[AIProvider.chat_with_tools] Tool '%s' raised: %s", tool_name, exc)
+
+                logger.info(
+                    "\n╔══════════════════════════════════════════════════════╗"
+                    "\n║  📦 TOOL RESULT"
+                    "\n║  Name : %s"
+                    "\n║  Result (%.80s...)"
+                    "\n╚══════════════════════════════════════════════════════╝",
+                    tool_name,
+                    result_text,
+                )
+
+                conversation.append({
+                    "role": "tool",
+                    "tool_call_id": tc.id,
+                    "content": result_text,
+                })
+
+        logger.warning("[AIProvider.chat_with_tools] Reached max tool iterations (%d)", _MAX_TOOL_ITERATIONS)
+        last_content = conversation[-1].get("content") or ""
+        try:
+            return AgentResponse.model_validate(json.loads(last_content))
+        except Exception:
+            return AgentResponse(response=last_content or "(no reply)", memories=[])
+
 
     async def classify_event(self, text: str, allowed_events: Sequence[str]) -> str:
         if not allowed_events:
@@ -124,6 +233,7 @@ class AIProvider:
             return event_name
 
         raise ValueError(f"invalid event returned: {event_name!r}")
+
 
     async def embed(self, text: str) -> list[float]:
         try:
