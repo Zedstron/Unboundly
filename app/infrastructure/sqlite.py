@@ -30,9 +30,7 @@ SessionFactory = async_sessionmaker(
 async def init_db() -> None:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
-        # create_all does not add columns to an existing SQLite database.
-        # Keep startup backwards compatible for installations created before
-        # transport message identity was introduced.
+
         columns = {
             row[1] for row in (await connection.execute(text("PRAGMA table_info(conversation_messages)"))).all()
         }
@@ -40,6 +38,7 @@ async def init_db() -> None:
             ("source", "VARCHAR(30)"),
             ("external_id", "VARCHAR(255)"),
             ("sender_id", "VARCHAR(255)"),
+            ("sender_name", "VARCHAR(255)")
         ):
             if name not in columns:
                 await connection.execute(text(f"ALTER TABLE conversation_messages ADD COLUMN {name} {definition}"))
@@ -55,6 +54,7 @@ async def save_message(
     source: str | None = None,
     external_id: str | None = None,
     sender_id: str | None = None,
+    sender_name: str = "Unknown"
 ) -> int:
     if direction not in ("user", "bot"):
         raise ValueError("direction must be either 'user' or 'bot'")
@@ -72,6 +72,7 @@ async def save_message(
             source=source,
             external_id=external_id,
             sender_id=sender_id,
+            sender_name=sender_name
         )
 
         session.add(message)

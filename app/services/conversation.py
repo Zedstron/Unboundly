@@ -9,10 +9,11 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.domain.mood import MoodEngine, MoodState
 from app.infrastructure.memory import ShortTermMemory
 from app.domain.models import Decision
+from app.services.bridges.models import SocialMessage, Operation
 from app.domain.behavior import BehaviorContext, BehaviorEngine
 from app.agents.persona_graph import PersonaAgentGraph
+from app.services.bridges.registry import registry
 
-from app.services.wppbridge import signal
 from app.infrastructure.sqlite import (
     clear_conversation,
     delete_message,
@@ -63,19 +64,16 @@ class ConversationService:
     async def clear_conversation(self, conversation_id: str) -> int:
         return await clear_conversation(self.persona["id"], conversation_id)
 
-    async def _bridge_signal(self, operation: str, **kwargs):
-        future = signal(self.persona["id"], operation, **kwargs)
-        if future is not None:
-            try:
-                await future
-            except Exception:
-                logger.exception("Failed WPP bridge operation %s for persona %s", operation, self.persona["id"])
+    async def __bridge_signal(self, operation: Operation, source=None, **kwargs):
+        if source and source != "local":
+            future = registry.get(source).signal(self.persona["id"], operation, **kwargs)
+            if future is not None:
+                try:
+                    await future
+                except Exception:
+                    logger.exception("Failed bridge operation %s for persona %s", operation, self.persona["id"])
 
-    async def mark_conversation_seen(
-        self,
-        conversation_id: str,
-        up_to_message_id: int | None = None,
-    ) -> list[int]:
+    async def mark_conversation_seen(self, conversation_id: str, source: str = None, up_to_message_id: int | None = None) -> list[int]:
         seen_ids = await mark_messages_seen(
             conversation_id,
             persona_id=self.persona["id"],
@@ -84,9 +82,8 @@ class ConversationService:
         if seen_ids:
             channel = f"persona:out:{self.persona['id']}:{conversation_id}"
             for mid in seen_ids:
-                logger.debug(
-                    f"[ConversationService.mark_conversation_seen] Publishing seen status: message_id={mid}, conversation_id={conversation_id}"
-                )
+                logger.debug(f"[ConversationService.mark_conversation_seen] Publishing seen status: message_id={mid}, conversation_id={conversation_id}")
+
                 await self.short_memory.redis.publish(
                     channel,
                     json.dumps({
@@ -97,31 +94,24 @@ class ConversationService:
                         "status": "seen",
                     }),
                 )
-            await self._bridge_signal("mark_seen", chat_id=conversation_id)
+
+            await self.__bridge_signal(Operation.MARK_SEEN, source=source, chat_id=conversation_id)
         return seen_ids
 
-    async def ingest(
-        self,
-        conversation_id: str,
-        text: str,
-        *,
-        source: str | None = None,
-        external_id: str | None = None,
-        sender_id: str | None = None,
-    ) -> dict:
-        logger.info(f"[ConversationService.ingest] Starting ingestion: persona_id={self.persona['id']}, conversation_id={conversation_id}, text_length={len(text)}")
+    async def ingest(self, message: SocialMessage) -> dict:
+        logger.info(f"[ConversationService.ingest] Starting ingestion: persona_id={self.persona['id']}, conversation_id={message.chat_id}, text_length={len(message.text)}")
         try:
             logger.debug(f"[ConversationService.ingest] Loading mood state for persona_id={self.persona['id']}")
             state = await self._load_state()
 
             logger.debug(f"[ConversationService.ingest] Classifying event")
-            event = await self._classify_event(text)
+            event = await self._classify_event(message.text)
             logger.debug(f"[ConversationService.ingest] Event classified as: {event}")
             
             state = self.mood.update(state, event)
             logger.debug(f"[ConversationService.ingest] Mood state updated: {state.values}")
 
-            self.states[conversation_id] = state
+            self.states[message.chat_id] = state
 
             await self._save_state(state)
             logger.debug(f"[ConversationService.ingest] Mood state saved for persona_id={self.persona['id']}")
@@ -134,13 +124,14 @@ class ConversationService:
 
             message_id = await save_message(
                 self.persona["id"],
-                conversation_id,
+                message.chat_id,
                 "user",
-                text,
+                message.text,
                 "delivered",
-                source=source,
-                external_id=external_id,
-                sender_id=sender_id,
+                source=message.provider,
+                external_id=None,
+                sender_id=message.sender_id,
+                sender_name=message.sender_name
             )
             logger.debug(f"[ConversationService.ingest] User message saved: message_id={message_id}")
 
@@ -156,48 +147,50 @@ class ConversationService:
             logger.info(f"[ConversationService.ingest] Behavior decision made: {decision.value}, online={ctx.online}, hour={ctx.hour}")
 
             if decision is Decision.NO_REPLY:
-                logger.info(f"[ConversationService.ingest] Decision: NO_REPLY for conversation_id={conversation_id}")
-                return {"message_id": message_id}
+                logger.info(f"[ConversationService.ingest] Decision: NO_REPLY for conversation_id={message.chat_id}")
+                return { "message_id": message_id }
 
             if decision is Decision.LATE_REPLY:
-                due = time() + self._delay_seconds(state, text)
+                due = time() + self._delay_seconds(state, message.text)
                 logger.info(f"[ConversationService.ingest] Decision: LATE_REPLY, scheduling for {due - time():.1f} seconds from now")
 
                 await self.short_memory.schedule(
                     "reply_pending",
                     {
-                        "conversation_id": conversation_id,
+                        "conversation_id": message.chat_id,
                         "persona_id": self.persona["id"],
-                        "user_message_id": message_id
+                        "user_message_id": message_id,
+                        "source": message.provider
                     },
                     due,
                 )
-                logger.debug(f"[ConversationService.ingest] Scheduled reply_pending task: conversation_id={conversation_id}")
+                logger.debug(f"[ConversationService.ingest] Scheduled reply_pending task: conversation_id={message.chat_id}")
 
-                return {"message_id": message_id}
+                return { "message_id": message_id }
 
             logger.info(f"[ConversationService.ingest] Decision: REPLY_NOW, scheduling immediate reply")
             await self.short_memory.schedule(
                 "reply_pending",
                 {
-                    "conversation_id": conversation_id,
+                    "conversation_id": message.chat_id,
                     "persona_id": self.persona["id"],
                     "user_message_id": message_id,
+                    "source": message.provider
                 },
                 time(),
             )
-            logger.debug(f"[ConversationService.ingest] Scheduled reply_pending task immediately: conversation_id={conversation_id}")
+            logger.debug(f"[ConversationService.ingest] Scheduled reply_pending task immediately: conversation_id={message.chat_id}")
 
-            return {"message_id": message_id}
+            return { "message_id": message_id }
         except Exception as e:
             logger.error(f"[ConversationService.ingest] Error during ingest: {e}", exc_info=True)
             raise
 
-    async def generate_reply(self, conversation_id: str, initiative: str | None = None) -> str:
+    async def generate_reply(self, conversation_id: str, initiative: str | None = None, source: str = None) -> str:
         logger.info(f"[ConversationService.generate_reply] Generating reply for conversation_id={conversation_id}, persona_id={self.persona['id']}")
         try:
             logger.debug(f"[ConversationService.generate_reply] Marking conversation messages as seen before typing")
-            await self.mark_conversation_seen(conversation_id)
+            await self.mark_conversation_seen(conversation_id, source=source)
 
             logger.debug(f"[ConversationService.generate_reply] Building prompt for conversation_id={conversation_id}")
             logger.debug(f"[ConversationService.generate_reply] Publishing typing indicator")

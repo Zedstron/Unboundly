@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_file_path: str = None
     mcp_server_urls: str = ""
+    identity_mode: str = "local"
 
     @property
     def mcp_server_url_list(self) -> list[str]:

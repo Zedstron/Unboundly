@@ -3,13 +3,15 @@ import asyncio
 from redis.asyncio import Redis
 from app.core.logger import get_logger
 from app.domain.models import MessageIn
-from app.services.wppbridge import on_message
+from app.services.bridges.registry import registry
 from app.infrastructure.persona import PersonaStore
+from app.services.bridges.models import SocialMessage
 from app.services.conversation import ConversationService
 from fastapi import APIRouter, Body, HTTPException, WebSocket, WebSocketDisconnect
 
 
 logger = get_logger(__name__)
+
 router = APIRouter(tags=["chat"])
 _services: dict[str: ConversationService] | None = {}
 _redis: Redis | None = None
@@ -28,9 +30,7 @@ async def init_services(redis: Redis) -> None:
         srv = ConversationService(personality, redis)
         state = await srv.load_state()
         _services[persona["id"]] = srv
-        logger.info(
-            f"[init_services] Service initialized and resumed mood state for persona_id={persona['id']}: {state.values}"
-        )
+        logger.info(f"[init_services] Service initialized and resumed mood state for persona_id={persona['id']}: {state.values}")
 
 def service(id: str) -> ConversationService:
     if not _services:
@@ -45,13 +45,13 @@ def service(id: str) -> ConversationService:
 def services() -> list[ConversationService]:
     return list((_services or {}).values())
 
-@on_message
-async def new_whatsapp_message(persona, message):
-    chat_id = message.get("from")
-    text = message.get("body", "")
+@registry.on_message
+async def new_bridge_message(message: SocialMessage):
+    if not message:
+        return
 
-    if chat_id and text:
-        await service(persona).ingest(chat_id, text)
+    if message.chat_id and message.text:
+        await service(message.session).ingest(message)
 
 @router.get("/{pid}/persona")
 async def get_persona(pid: str):
@@ -138,7 +138,9 @@ async def update_persona_state_endpoint(pid: str, payload: dict = Body(...)):
 async def send_message(pid: str, payload: MessageIn):
     logger.info(f"[send_message] Received message for persona_id={pid}, conversation_id={payload.conversation_id}, text_length={len(payload.text)}")
     try:
-        result = await service(pid).ingest(payload.conversation_id, payload.text)
+        message = SocialMessage("local", pid, None, "message", payload.conversation_id, payload.sender_id, payload.sender_name, payload.text, None, None)
+        result = await service(pid).ingest(message)
+
         logger.debug(f"[send_message] Message ingested successfully: message_id={result.get('message_id')}")
 
         return result

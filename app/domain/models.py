@@ -27,6 +27,7 @@ class MessageIn(BaseModel):
     conversation_id: str
     text: str = Field(min_length=1, max_length=8000)
     sender_id: str = "user"
+    sender_name: str = "Unknown"
 
 class OutboundMessage(BaseModel):
     conversation_id: str

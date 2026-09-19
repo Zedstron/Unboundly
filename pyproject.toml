@@ -20,7 +20,8 @@ dependencies = [
   "sqlalchemy",
   "jinja2",
   "WPP_Whatsapp",
-  "tzdata"
+  "tzdata",
+  "instagrapi"
 ]
 
 [project.optional-dependencies]

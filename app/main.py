@@ -1,102 +1,45 @@
 import asyncio
 from pathlib import Path
 from fastapi import FastAPI
-from redis.asyncio import Redis
 from app.core.config import settings
 from app.core.logger import get_logger
+from app.core.lifecycle import AppContext
 from contextlib import asynccontextmanager
 from fastapi.staticfiles import StaticFiles
-from app.services.workers import worker_task
-from app.infrastructure.sqlite import init_db
-from app.infrastructure.mcp import registry as mcp_registry
 from app.web.routes import router as web_router
-from app.api.routes import router as api_router, init_services
+from app.api.routes import router as api_router
 
 logger = get_logger(__name__)
 
+context = AppContext()
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.debug("[app/lifespan] Application startup: initializing database")
+    await context.startup()
+    app.state.context = context
 
     try:
-        await init_db()
-        logger.info("[app/lifespan] Database initialized successfully")
-    except Exception as e:
-        logger.error(f"[app/lifespan] Database initialization failed: {e}", exc_info=True)
-        raise
+        yield
+    finally:
+        await context.shutdown()
 
-    logger.debug("[app/lifespan] Connecting to MCP remote servers")
-    try:
-        await mcp_registry.connect()
-        if mcp_registry.has_tools:
-            logger.info(
-                "[app/lifespan] MCP tools available: %s",
-                mcp_registry.get_tool_names(),
-            )
-        else:
-            logger.info("[app/lifespan] No MCP tools configured — running without tool use")
-    except Exception as e:
-        logger.error(f"[app/lifespan] MCP registry connect failed: {e}", exc_info=True)
-
-    logger.debug(f"[app/lifespan] Connecting to Redis: {settings.redis_url}")
-    try:
-        redis = Redis.from_url(settings.redis_url, decode_responses=True)
-        logger.info("[app/lifespan] Redis connection established")
-    except Exception as e:
-        logger.error(f"[app/lifespan] Redis connection failed: {e}", exc_info=True)
-        raise
-
-    logger.debug("[app/lifespan] Initializing conversation services")
-    try:
-        await init_services(redis)
-        logger.info("[app/lifespan] Conversation services initialized")
-    except Exception as e:
-        logger.error(f"[app/lifespan] Failed to initialize services: {e}", exc_info=True)
-        raise
-
-    app.state.redis = redis
-
-    logger.debug("[app/lifespan] Starting background worker task")
-    worker = asyncio.create_task(worker_task(redis))
-    app.state.worker = worker
-    logger.debug("[app/lifespan] Background worker task started")
-
-    yield
-
-    logger.debug("[app/lifespan] Application shutdown: cancelling worker task")
-    worker.cancel()
+async def NoLocalServer():
+    await context.startup()
 
     try:
-        await asyncio.wait_for(worker, timeout=1.0)
-    except (asyncio.CancelledError, asyncio.TimeoutError):
-        logger.debug("[app/lifespan] Worker task cancelled or timed out")
-    except Exception as e:
-        logger.warning(f"[app/lifespan] Error cancelling worker: {e}")
+        await asyncio.Event().wait()
+    finally:
+        await context.shutdown()
 
-    logger.debug("[app/lifespan] Closing Redis connection")
-    try:
-        await asyncio.wait_for(redis.aclose(), timeout=1.0)
-        await asyncio.wait_for(redis.connection_pool.disconnect(), timeout=1.0)
-        logger.info("[app/lifespan] Redis connection closed")
-    except Exception as e:
-        logger.warning(f"[app/lifespan] Error closing Redis: {e}")
+directory = Path(__file__).resolve().parent.parent
+directory = directory / "ui" / "assets"
 
-    logger.debug("[app/lifespan] Closing MCP connections")
-    try:
-        await mcp_registry.close()
-    except Exception as e:
-        logger.warning(f"[app/lifespan] Error closing MCP registry: {e}")
+if settings.identity_mode in ( "local", "both" ):
+    app = FastAPI(title="Persona Chat", lifespan=lifespan)
+    app.mount("/assets", StaticFiles(directory=directory), name="assets")
 
-    logger.info("[app/lifespan] Application shutdown complete")
-
-
-
-BASE_DIR = Path(__file__).resolve().parent.parent
-UI_DIR = BASE_DIR / "ui"
-
-app = FastAPI(title="Persona Chat", lifespan=lifespan)
-
-app.mount("/assets", StaticFiles(directory=UI_DIR / "assets"), name="assets")
-
-app.include_router(web_router)
-app.include_router(api_router, prefix="/api")
+    app.include_router(web_router)
+    app.include_router(api_router, prefix="/api")
+else:
+    # No local UI serving, only bridge will be active
+    asyncio.run(NoLocalServer())

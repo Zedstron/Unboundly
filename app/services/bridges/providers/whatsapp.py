@@ -16,6 +16,10 @@ from typing import Any
 import janus
 from WPP_Whatsapp import Create
 
+from app.services.bridges.base import SocialBridge
+from app.services.bridges.future import AwaitableFuture
+from app.services.bridges.models import Operation, SocialMessage
+
 from app.core.logger import get_logger
 
 logger = get_logger("wppbridge")
@@ -53,7 +57,7 @@ def _print_qr(**payload: Any) -> None:
 @dataclass(slots=True)
 class Command:
     session: str
-    operation: str
+    operation: Operation
     args: tuple[Any, ...]
     kwargs: dict[str, Any]
     future: Future
@@ -77,7 +81,7 @@ class AwaitableFuture:
         return wait().__await__()
 
 
-class Bridge:
+class WhatsAppBridge(SocialBridge):
     def __init__(self):
         self.session = os.getenv("WPPBRIDGE_SESSION", "wppbridge")
         self.token_dir = os.getenv("WPPBRIDGE_TOKEN_DIR") or os.path.join(os.getcwd(), "tokens")
@@ -104,7 +108,7 @@ class Bridge:
         self._thread.start()
         self._started.wait()
 
-    def signal(self, session, operation: str, *args: Any, **kwargs: Any) -> AwaitableFuture:
+    def signal(self, session, operation: Operation, *args: Any, **kwargs: Any) -> AwaitableFuture:
         if self._stopped.is_set():
             raise RuntimeError("wppbridge is stopped")
 
@@ -190,7 +194,7 @@ class Bridge:
             command = await self._queue.async_q.get()
 
             try:
-                if command.operation == "__stop__":
+                if command.operation == Operation.STOP_SERVICE:
                     command.future.set_result(None)
                     return
 
@@ -222,7 +226,7 @@ class Bridge:
         args = command.args
         kwargs = command.kwargs
 
-        if operation == "send_message":
+        if operation == Operation.SEND_MESSAGE:
             return await self._call(
                 self._client.sendText,
                 kwargs["to"],
@@ -230,22 +234,22 @@ class Bridge:
                 kwargs.get("options"),
             )
 
-        if operation == "mark_seen":
+        if operation == Operation.MARK_SEEN:
             return await self._call(
                 self._client.sendSeen,
                 kwargs["chat_id"],
             )
 
-        if operation == "set_online":
+        if operation == Operation.SET_ONLINE:
             return await self._call(
                 self._client.setOnlinePresence,
                 kwargs.get("online", True),
             )
 
-        if operation == "send_attachment":
+        if operation == Operation.SEND_ATTACHMENT:
             return await self._send_attachment(**kwargs)
 
-        if operation == "send_reaction":
+        if operation == Operation.SEND_REACTION:
             return await self._send_reaction(**kwargs)
 
         raise ValueError(f"unknown operation: {operation}")
@@ -296,9 +300,26 @@ class Bridge:
 
         return result
 
+    def _normalize_message(self, message: dict[str, Any]) -> SocialMessage:
+        return SocialMessage(
+            provider="whatsapp",
+            session=self.session,
+            message_id=str(message.get("id", "")),
+            chat_id=str(message.get("from", "")),
+            sender_id=str(message.get("author") or message.get("from", "")),
+            sender_name=message.get("notifyName"),
+            text=message.get("body", ""),
+            timestamp=self._parse_timestamp(
+                message.get("timestamp")
+            ),
+            raw=message,
+        )
+
     def _on_message(self, message: dict[str, Any]) -> None:
         with self._handlers_lock:
             handlers = tuple(self._handlers)
+
+        message = self._normalize_message(message)
 
         for handler in handlers:
             try:
@@ -323,7 +344,7 @@ class Bridge:
 
         self._queue.sync_q.put(
             Command(
-                operation="__stop__",
+                operation=Operation.STOP_SERVICE,
                 args=(),
                 kwargs={},
                 future=future,
@@ -336,20 +357,3 @@ class Bridge:
             pass
 
         self._stopped.set()
-
-
-_bridge = None
-if os.getenv("WPPBRIDGE_ENABLED", "0") == "1":
-    _bridge = Bridge()
-
-
-def signal(session, operation: str, *args: Any, **kwargs: Any) -> AwaitableFuture:
-    if _bridge:
-        return _bridge.signal(session, operation, *args, **kwargs)
-
-
-def on_message(handler: Callable[[str, dict[str, Any]], Any]) -> Callable[[], None]:
-    if _bridge:
-        return _bridge.on_message(handler)
-
-    return handler

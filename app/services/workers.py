@@ -3,21 +3,26 @@ import time
 import asyncio
 from redis.asyncio import Redis
 from app.core.logger import get_logger
-from app.services.wppbridge import signal
 from app.api.routes import service, services
+from app.services.bridges.models import Operation
+from app.services.bridges.registry import registry
 from app.infrastructure.memory import ShortTermMemory
 from app.infrastructure.sqlite import mark_message_seen, save_message, set_external_id
 
 logger = get_logger(__name__)
 
 
-async def bridge_signal(session: str, operation: str, **kwargs):
-    future = signal(session, operation, **kwargs)
-    if future is None:
-        logger.debug("WPP bridge disabled; skipping operation=%s", operation)
-        return None
+async def bridge_signal(session: str, operation: Operation, source = None, **kwargs):
+    if source and source != "local":
+        future = registry.get(source).signal(session, operation, **kwargs)
 
-    return await future
+        if future is None:
+            logger.debug("Identity Bridge in corrupt state; skipping operation=%s", operation)
+            return None
+
+        return await future
+
+    return None
 
 
 def transport_message_id(result) -> str | None:
@@ -74,7 +79,7 @@ async def worker_task(redis: Redis) -> None:
                                 logger.info(f"[worker_task/life_tick] Presence changed for persona_id={persona_id}, publishing update")
                                 await publish_presence(redis, persona_id, result["presence"])
                                 try:
-                                    await bridge_signal(persona_id, "set_online", online=bool(result["presence"].get("online")))
+                                    await bridge_signal(persona_id, Operation.SET_ONLINE, online=bool(result["presence"].get("online")))
                                 except Exception:
                                     logger.exception("Failed to update WPP online presence for persona_id=%s", persona_id)
 
@@ -87,14 +92,13 @@ async def worker_task(redis: Redis) -> None:
                                     channel = f"persona:out:{conversation_service.persona['id']}:{action['conversation_id']}"
                                     logger.debug(f"[worker_task/life_tick] Publishing seen status for message_id={action['message_id']}, conversation_id={action['conversation_id']}")
 
-                                    try:
-                                        await bridge_signal(persona_id, "mark_seen", chat_id=action["conversation_id"])
-                                    except Exception:
-                                        logger.exception(
-                                            "Failed to mark WPP chat seen: conversation_id=%s",
-                                            action["conversation_id"],
-                                        )
+                                    # mark seen in local db for persistence
+                                    await mark_message_seen(action["conversation_id"], action["message_id"])
 
+                                    # mark seen in actuall identity bridge e.g. Whatsapp|Instagram
+                                    await bridge_signal(persona_id, Operation.MARK_SEEN, chat_id=action["conversation_id"])
+
+                                    # mark seen in local UI (Realtime)
                                     await redis.publish(channel, json.dumps({
                                         "type": "status",
                                         "persona_id": conversation_service.persona["id"],
@@ -105,10 +109,8 @@ async def worker_task(redis: Redis) -> None:
 
                             scheduled = await conversation_service.schedule_self_follow_ups()
                             if scheduled:
-                                logger.info(
-                                    "[worker_task/life_tick] Scheduled %s self follow-up(s) for persona_id=%s",
-                                    scheduled, persona_id,
-                                )
+                                logger.info("[worker_task/life_tick] Scheduled %s self follow-up(s) for persona_id=%s", scheduled, persona_id)
+
                         except Exception as e:
                             logger.error(f"[worker_task/life_tick] Error processing life_tick for persona_id={persona_id}: {e}", exc_info=True)
 
@@ -153,6 +155,7 @@ async def worker_task(redis: Redis) -> None:
                                 payload["text"] = await conversation_service.generate_reply(
                                     conversation_id,
                                     initiative=payload.get("trigger"),
+                                    source=payload.get("source")
                                 )
                                 elapsed = time.time() - start_time
                                 logger.info(f"[worker_task/reply] Reply generated successfully in {elapsed:.2f}s: conversation_id={conversation_id}, text_length={len(payload['text'])}")
@@ -171,7 +174,7 @@ async def worker_task(redis: Redis) -> None:
                             logger.exception("Failed to mark conversation seen after bot reply: conversation_id=%s", conversation_id)
 
                         try:
-                            result = await bridge_signal(payload["persona_id"], "send_message", to=conversation_id, text=payload["text"])
+                            result = await bridge_signal(payload["persona_id"], Operation.SEND_MESSAGE, to=conversation_id, text=payload["text"])
                             external_id = transport_message_id(result)
                             if external_id:
                                 await set_external_id(bot_message_id, "whatsapp", external_id)
