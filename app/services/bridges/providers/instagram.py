@@ -52,6 +52,7 @@ class InstagramBridge(SocialBridge):
         self._started = threading.Event()
         self._ready = threading.Event()
         self._stopped = threading.Event()
+        self._usernames = dict()
 
         self._startup_error: BaseException | None = None
 
@@ -419,8 +420,19 @@ class InstagramBridge(SocialBridge):
             return None
 
         cl = self._require_client()
-        uname = cl.username_from_user_id(userid)
-        uname = cl.user_info_by_username(uname).full_name
+        uname = self._usernames.get(userid)
+
+        if not uname:
+            self._usernames[userid] = uname = cl.username_from_user_id(userid)
+
+        if uname == self.username:
+            return None
+
+        # TODO: possibly use SQLITE here to maintain our own trusted contacts
+        # and instead of saving instanty let person build trust first
+        uname = self._usernames.get(uname)
+        if not uname:
+            self._usernames[uname] = uname = cl.user_info_by_username(uname).full_name
 
         return SocialMessage(
             provider="instagram",
