@@ -430,9 +430,9 @@ class InstagramBridge(SocialBridge):
 
         # TODO: possibly use SQLITE here to maintain our own trusted contacts
         # and instead of saving instanty let person build trust first
-        uname = self._usernames.get(uname)
-        if not uname:
-            self._usernames[uname] = uname = cl.user_info_by_username(uname).full_name
+        fullname = self._usernames.get(uname)
+        if not fullname:
+            self._usernames[uname] = fullname = cl.user_info_by_username(uname).full_name
 
         return SocialMessage(
             provider="instagram",
@@ -443,7 +443,7 @@ class InstagramBridge(SocialBridge):
             chat_id=message.get("thread_id", None),
             is_disappearing=message.get("is_disappearing"),
             sender_id=userid,
-            sender_name=uname,
+            sender_name=fullname,
             text=message.get("text", None),
             timestamp=self._parse_timestamp(message.get("timestamp")),
             raw=message
