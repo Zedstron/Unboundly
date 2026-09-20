@@ -14,6 +14,7 @@ dependencies = [
   "redisvl>=0.10",
   "mcp[cli]>=2.0",
   "aiosqlite",
+  "sentence-transformers>=3.0",
   "colorlog>=6.8",
   "pytest>=8.4",
   "janus>=2.0,<3.0",
@@ -21,7 +22,8 @@ dependencies = [
   "jinja2",
   "WPP_Whatsapp",
   "tzdata",
-  "instagrapi"
+  "instagrapi",
+  "sentence_transformers"
 ]
 
 [project.optional-dependencies]

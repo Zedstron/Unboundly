@@ -188,6 +188,9 @@ async def get_unread_user_messages(persona_id: str) -> list[dict]:
                 "conversation_id": message.conversation_id,
                 "content": message.content,
                 "created_at": message.created_at,
+                "source": message.source,
+                "sender_id": message.sender_id,
+                "sender_name": message.sender_name
             }
             for message in result.scalars().all()
         ]

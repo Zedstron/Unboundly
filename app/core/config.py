@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     embedding_base_url: str = "http://localhost:1234/v1"
     embedding_api_key: str = ""
     embedding_model: str = ""
+    local_embedding_generator: bool = False
+    local_embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
     logging_enabled: bool = True
     log_level: str = "INFO"
     log_file_path: str = None

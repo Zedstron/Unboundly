@@ -1,6 +1,14 @@
 import json
-from openai import AsyncOpenAI
+import os
 from collections.abc import Sequence
+
+from openai import AsyncOpenAI
+
+try:
+    from sentence_transformers import SentenceTransformer
+except ImportError:
+    SentenceTransformer = None
+
 from app.core.logger import get_logger
 from app.core.prompts import get_prompt
 from app.domain.models import AgentResponse
@@ -19,6 +27,8 @@ class AIProvider:
         embedding_model: str | None = None,
         embedding_base_url: str | None = None,
         embedding_api_key: str | None = None,
+        local_embedding_generator: bool | None = None,
+        local_embedding_model: str | None = None,
     ) -> None:
         self.client = AsyncOpenAI(base_url=base_url, api_key=api_key or "")
         self.model = model
@@ -30,13 +40,42 @@ class AIProvider:
         self.embedding_base_url = embedding_base_url or base_url
         self.embedding_api_key = embedding_api_key or api_key or ""
 
+        self.local_embedding_generator = self._resolve_bool_setting(
+            local_embedding_generator,
+            os.getenv("LOCAL_EMBEDDING_GENERATOR", "0"),
+        )
+        self.local_embedding_model_name = local_embedding_model or os.getenv(
+            "LOCAL_EMBEDDING_MODEL",
+            "sentence-transformers/all-MiniLM-L6-v2",
+        )
+
         self.embedding_client = AsyncOpenAI(
             base_url=self.embedding_base_url,
             api_key=self.embedding_api_key,
         )
 
         self.embedding_model = embedding_model or model
+        self.local_embedding_model = None
+
+        if self.local_embedding_generator:
+            if SentenceTransformer is None:
+                raise RuntimeError(
+                    "sentence-transformers is required when LOCAL_EMBEDDING_GENERATOR=1. "
+                    "Install the project dependencies or enable the cloud embedding generator."
+                )
+            self.local_embedding_model = SentenceTransformer(self.local_embedding_model_name)
+            logger.info(
+                "[OpenAICompatibleAI.__init__] Using local sentence-transformer embeddings: %s",
+                self.local_embedding_model_name,
+            )
+
         logger.debug("[OpenAICompatibleAI.__init__] Initialized AI service: model=%s", model)
+
+    @staticmethod
+    def _resolve_bool_setting(setting: bool | str | None, env_value: str) -> bool:
+        if setting is not None:
+            return str(setting).strip().lower() in {"1", "true", "yes", "on"}
+        return env_value.strip().lower() in {"1", "true", "yes", "on"}
 
 
     async def chat(self, messages: Sequence[dict[str, str]], *, temperature: float = 0.8) -> AgentResponse:
@@ -235,7 +274,30 @@ class AIProvider:
         raise ValueError(f"invalid event returned: {event_name!r}")
 
 
+    def _embed_local(self, text: str) -> list[float]:
+        if self.local_embedding_model is None:
+            if SentenceTransformer is None:
+                raise RuntimeError(
+                    "sentence-transformers is required when LOCAL_EMBEDDING_GENERATOR=1. "
+                    "Install the project dependencies or disable local embeddings."
+                )
+            self.local_embedding_model = SentenceTransformer(self.local_embedding_model_name)
+
+        embedding = self.local_embedding_model.encode(
+            text,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+        )
+        return [float(value) for value in list(embedding)]
+
     async def embed(self, text: str) -> list[float]:
+        if self.local_embedding_generator:
+            try:
+                return self._embed_local(text)
+            except Exception as e:
+                logger.error("[OpenAICompatibleAI.embed] Error generating local embedding: %s", e, exc_info=True)
+                raise
+
         try:
             response = await self.embedding_client.embeddings.create(
                 model=self.embedding_model or self.model,

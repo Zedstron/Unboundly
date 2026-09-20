@@ -195,7 +195,6 @@ class ConversationService:
             logger.debug(f"[ConversationService.generate_reply] Marking conversation messages as seen before typing")
             await self.mark_conversation_seen(conversation_id, source=source)
 
-            logger.debug(f"[ConversationService.generate_reply] Building prompt for conversation_id={conversation_id}")
             logger.debug(f"[ConversationService.generate_reply] Publishing typing indicator")
             await self.short_memory.publish_typing(self.persona["id"], conversation_id, True)
 
@@ -416,6 +415,7 @@ class ConversationService:
                 
                 event = await self._classify_event(message["content"])
                 state = self.mood.update(state, event)
+
                 self.states[message["conversation_id"]] = state
                 logger.debug(f"[ConversationService.process_unread_messages] Event classified as: {event}, mood updated: {state.values}")
 
@@ -444,6 +444,9 @@ class ConversationService:
                     "conversation_id": message["conversation_id"],
                     "decision": decision.value,
                     "content": message["content"],
+                    "source": message["source"],
+                    "sender_id": message["sender_id"],
+                    "sender_name": message["sender_name"]
                 })
 
             await self._save_state(state)
@@ -461,6 +464,8 @@ class ConversationService:
                             "conversation_id": action["conversation_id"],
                             "persona_id": self.persona["id"],
                             "user_message_id": action["message_id"],
+                            "source": action["source"],
+                            "sender_id": action["sender_id"]
                         },
                         time() + delay,
                     )
@@ -472,6 +477,8 @@ class ConversationService:
                             "conversation_id": action["conversation_id"],
                             "persona_id": self.persona["id"],
                             "user_message_id": action["message_id"],
+                            "source": action["source"],
+                            "sender_id": action["sender_id"]
                         },
                         time(),
                     )

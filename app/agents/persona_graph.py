@@ -30,6 +30,8 @@ class PersonaAgentGraph:
             embedding_model=settings.embedding_model,
             embedding_base_url=settings.embedding_base_url,
             embedding_api_key=settings.embedding_api_key,
+            local_embedding_generator=settings.local_embedding_generator,
+            local_embedding_model=settings.local_embedding_model,
         )
         self.short_memory = ShortTermMemory(redis)
         self.long_memory = LongTermMemory(redis, self.ai)
