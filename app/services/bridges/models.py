@@ -15,18 +15,20 @@ class Operation(StrEnum):
 
 @dataclass(slots=True)
 class SocialMessage:
-    provider: str
     session: str
 
     message_id: str
     message_type: str
     chat_id: str
+    item_id: str
 
     sender_id: str
     sender_name: str | None
 
     text: str
 
+    provider: str = "local"
+    is_disappearing: bool = False
     timestamp: datetime | None = None
 
     raw: dict[str, Any] = field(default_factory=dict)

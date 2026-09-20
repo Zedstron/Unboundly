@@ -13,6 +13,7 @@ logger = get_logger(__name__)
 
 
 async def bridge_signal(session: str, operation: Operation, source = None, **kwargs):
+    print(session, operation, source, kwargs)
     if source and source != "local":
         future = registry.get(source).signal(session, operation, **kwargs)
 
@@ -79,9 +80,12 @@ async def worker_task(redis: Redis) -> None:
                                 logger.info(f"[worker_task/life_tick] Presence changed for persona_id={persona_id}, publishing update")
                                 await publish_presence(redis, persona_id, result["presence"])
                                 try:
-                                    await bridge_signal(persona_id, Operation.SET_ONLINE, online=bool(result["presence"].get("online")))
+                                    # TODO: possibly decide per bridge type e.g. online in insta but not in whatsapp, for now its always insta
+                                    # Also thread_id needed which is not currently being handeled
+                                    # await bridge_signal(persona_id, Operation.SET_ONLINE, source="instagram", online=bool(result["presence"].get("online")))
+                                    pass
                                 except Exception:
-                                    logger.exception("Failed to update WPP online presence for persona_id=%s", persona_id)
+                                    logger.exception("Failed to update online presence for persona_id=%s", persona_id)
 
                             if result["became_online"]:
                                 logger.info(f"[worker_task/life_tick] Persona became online: persona_id={persona_id}, processing unread messages")
@@ -96,7 +100,7 @@ async def worker_task(redis: Redis) -> None:
                                     await mark_message_seen(action["conversation_id"], action["message_id"])
 
                                     # mark seen in actuall identity bridge e.g. Whatsapp|Instagram
-                                    await bridge_signal(persona_id, Operation.MARK_SEEN, chat_id=action["conversation_id"])
+                                    await bridge_signal(persona_id, Operation.MARK_SEEN, source=action.get("source"), chat_id=action['conversation_id'], message_id=action["message_id"])
 
                                     # mark seen in local UI (Realtime)
                                     await redis.publish(channel, json.dumps({
@@ -166,7 +170,7 @@ async def worker_task(redis: Redis) -> None:
                             logger.debug(f"[worker_task/reply] Text already in payload, skipping generation")
 
                         logger.debug(f"[worker_task/reply] Saving bot message: persona_id={persona_id}, conversation_id={conversation_id}, text_length={len(payload['text'])}")
-                        bot_message_id = await save_message(payload['persona_id'], conversation_id, 'bot', payload["text"], 'seen')
+                        bot_message_id = await save_message(payload['persona_id'], conversation_id, 'bot', payload["text"], 'seen', source=payload.get("source"))
                         logger.info(f"[worker_task/reply] Bot message saved: message_id={bot_message_id}, conversation_id={conversation_id}")
                         try:
                             await conversation_service.mark_conversation_seen(conversation_id)
@@ -174,7 +178,7 @@ async def worker_task(redis: Redis) -> None:
                             logger.exception("Failed to mark conversation seen after bot reply: conversation_id=%s", conversation_id)
 
                         try:
-                            result = await bridge_signal(payload["persona_id"], Operation.SEND_MESSAGE, to=conversation_id, text=payload["text"])
+                            result = await bridge_signal(payload["persona_id"], Operation.SEND_MESSAGE, source=payload.get("source"), to=conversation_id, text=payload["text"])
                             external_id = transport_message_id(result)
                             if external_id:
                                 await set_external_id(bot_message_id, "whatsapp", external_id)

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import inspect
 import os
+import asyncio
 import threading
+from datetime import datetime, timezone
 from concurrent.futures import Future
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -103,8 +105,8 @@ class InstagramBridge(SocialBridge):
 
     def _run(self) -> None:
         try:
-            self._loop = __import__("asyncio").new_event_loop()
-            __import__("asyncio").set_event_loop(self._loop)
+            self._loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._loop)
 
             self._started.set()
 
@@ -164,15 +166,18 @@ class InstagramBridge(SocialBridge):
             client.load_settings(self.session_file, override_app_version=True)
 
         try:
-            client.login(self.username, self.password)
+            code = os.getenv("INSTABRIDGE_AUTH_CODE")
+            client.login(
+                self.username,
+                self.password,
+                verification_code=code,
+            )
         except BaseException as exc:
             if not self._is_upgrade_error(exc):
                 raise
 
-            logger.warning(
-                "Instagram reported a stale or outdated app profile; clearing cached session and retrying with a fresh app configuration. Error: %s",
-                exc,
-            )
+            logger.warning("Instagram reported a stale or outdated app profile; clearing cached session and retrying: %s", exc)
+
             self._clear_stale_session()
 
             client = self._create_client()
@@ -183,14 +188,70 @@ class InstagramBridge(SocialBridge):
         client.realtime_on("message", self._on_message)
 
         realtime = client.realtime_connect()
-        realtime.direct_subscribe()
+
+        state = realtime.direct_subscribe()
+
+        logger.info( "Instagram realtime connected; direct subscription active: %s", state)
 
         self._client = client
         self._realtime = realtime
 
         self._ready.set()
 
+        self._realtime_task = asyncio.create_task(
+            self._realtime_reader(),
+            name="instabridge-realtime-reader",
+        )
+
         logger.info("Instagram bridge ready")
+
+    async def _shutdown_realtime(self) -> None:
+        if self._realtime_task is not None:
+            self._realtime_task.cancel()
+
+            try:
+                await self._realtime_task
+            except asyncio.CancelledError:
+                pass
+
+            self._realtime_task = None
+
+        if self._realtime is not None:
+            try:
+                self._realtime.disconnect()
+            except Exception:
+                logger.exception("failed to disconnect Instagram realtime")
+
+    async def _realtime_reader(self) -> None:
+        realtime = self._require_realtime()
+
+        logger.info("Instagram realtime reader started")
+
+        while not self._stopped.is_set():
+            try:
+                await asyncio.to_thread(realtime.read_once)
+
+            except TimeoutError:
+                continue # eating timeout exception
+
+            except OSError as exc:
+                if self._stopped.is_set():
+                    break
+
+                logger.warning("Instagram realtime socket error: %s; reconnecting...", exc, exc_info=True)
+
+                await asyncio.sleep(2)
+                # TODO: Possibly reconnection attempt here
+
+            except Exception:
+                if self._stopped.is_set():
+                    break
+
+                logger.exception("Unexpected Instagram realtime reader error")
+
+                await asyncio.sleep(2)
+
+        logger.info("Instagram realtime reader stopped")
 
     async def _worker(self) -> None:
         while True:
@@ -199,6 +260,7 @@ class InstagramBridge(SocialBridge):
             try:
                 if command.operation == Operation.STOP_SERVICE:
                     command.future.set_result(None)
+                    await self._shutdown_realtime()
                     return
 
                 if not self._ready.is_set():
@@ -226,7 +288,7 @@ class InstagramBridge(SocialBridge):
             if self._startup_error is not None:
                 raise RuntimeError("instabridge failed to initialize") from self._startup_error
 
-            await __import__("asyncio").sleep(0.1)
+            await asyncio.sleep(0.1)
 
     async def _execute(self, command: Command) -> Any:
         operation = command.operation
@@ -314,9 +376,7 @@ class InstagramBridge(SocialBridge):
                 waveform=None,
             )
 
-        raise ValueError(
-            f"unsupported Instagram attachment: {suffix}"
-        )
+        raise ValueError(f"unsupported Instagram attachment: {suffix}")
 
     async def _send_reaction(
         self,
@@ -341,65 +401,75 @@ class InstagramBridge(SocialBridge):
             emoji=str(reaction),
         )
 
-    async def _call(
-        self,
-        function: Callable[..., Any],
-        *args: Any,
-        **kwargs: Any,
-    ) -> Any:
-        result = function(
-            *args,
-            **kwargs,
-        )
+    async def _call(self, function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        result = function(*args, **kwargs)
 
         if inspect.isawaitable(result):
             return await result
 
         return result
 
-    def _normalize_message(self, message: dict[str, Any]) -> SocialMessage:
-        print(message)
+    def _normalize_message(self, message: dict[str, Any]) -> SocialMessage | None:
+        message = message.get("message")
+        if not message:
+            return None
+
+        userid = message.get("user_id", None)
+        if not userid:
+            return None
+
+        cl = self._require_client()
+        uname = cl.username_from_user_id(userid)
+        uname = cl.user_info_by_username(uname).full_name
+
         return SocialMessage(
             provider="instagram",
             session=self.session,
-            message_id=str(
-                message.get("message_id", "")
-            ),
-            message_type="message",
-            chat_id=str(
-                message.get("thread_id", "")
-            ),
-            sender_id=str(
-                message.get("user_id", "")
-            ),
-            sender_name=message.get("username"),
-            text=message.get("text", ""),
-            timestamp=self._parse_timestamp(
-                message.get("timestamp")
-            ),
-            raw=message,
+            message_id=message.get("message_id", None),
+            message_type=message.get("item_type"),
+            item_id=message.get("item_id", None),
+            chat_id=message.get("thread_id", None),
+            is_disappearing=message.get("is_disappearing"),
+            sender_id=userid,
+            sender_name=uname,
+            text=message.get("text", None),
+            timestamp=self._parse_timestamp(message.get("timestamp")),
+            raw=message
         )
 
-    def _on_message(self, message: dict[str, Any]) -> None:
-        event = self._normalize_message(message)
-        self._dispatch_message(self.session, event)
+    def _parse_timestamp(self, value: Any) -> datetime | None:
+        if value is None:
+            return None
 
-    def _dispatch_message(self, session: str, message: SocialMessage) -> None:
+        if isinstance(value, datetime):
+            return value
+
+        if isinstance(value, (int, float)):
+            value = float(value)
+
+            # Detect timestamp precision by magnitude
+            if value > 1e14:
+                value /= 1_000_000
+            elif value > 1e11:
+                value /= 1_000
+
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+
+        return None
+
+    def _on_message(self, message: dict[str, Any]) -> None:
+        if message:
+            event = self._normalize_message(message)
+            if event:
+                self._dispatch_message(event)
+
+    def _dispatch_message(self, message: SocialMessage) -> None:
         with self._handlers_lock:
             handlers = tuple(self._handlers)
 
         for handler in handlers:
             try:
-                result = handler(session, message)
-
-                if inspect.isawaitable(result):
-                    import asyncio
-
-                    asyncio.run_coroutine_threadsafe(
-                        self._run_handler(result),
-                        self._loop,
-                    )
-
+                handler(message)
             except BaseException:
                 logger.exception("message handler failed")
 

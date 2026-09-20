@@ -129,10 +129,11 @@ class ConversationService:
                 message.text,
                 "delivered",
                 source=message.provider,
-                external_id=None,
+                external_id=message.message_id,
                 sender_id=message.sender_id,
                 sender_name=message.sender_name
             )
+
             logger.debug(f"[ConversationService.ingest] User message saved: message_id={message_id}")
 
             ctx = BehaviorContext(
@@ -160,7 +161,8 @@ class ConversationService:
                         "conversation_id": message.chat_id,
                         "persona_id": self.persona["id"],
                         "user_message_id": message_id,
-                        "source": message.provider
+                        "source": message.provider,
+                        "sender_id": message.sender_id
                     },
                     due,
                 )
@@ -175,7 +177,8 @@ class ConversationService:
                     "conversation_id": message.chat_id,
                     "persona_id": self.persona["id"],
                     "user_message_id": message_id,
-                    "source": message.provider
+                    "source": message.provider,
+                    "sender_id": message.sender_id
                 },
                 time(),
             )
@@ -218,7 +221,6 @@ class ConversationService:
             raise
 
     async def _load_state(self) -> MoodState:
-        # 1. Primary persistent source: SQLite
         try:
             db_state = await get_persona_state_db(self.persona["id"])
             if db_state:
@@ -236,11 +238,12 @@ class ConversationService:
                     )
                 except Exception:
                     pass
+
                 return state
         except Exception as e:
             logger.warning(f"[ConversationService._load_state] Failed to load state from SQLite for persona_id={self.persona['id']}: {e}")
 
-        # 2. Fallback: check Redis in case migrating
+
         try:
             stored = await self.short_memory.get_persona_state(self.persona["id"])
             if stored:
@@ -260,7 +263,7 @@ class ConversationService:
         except Exception as e:
             logger.warning(f"[ConversationService._load_state] Failed to load state from Redis for persona_id={self.persona['id']}: {e}")
 
-        # 3. Default: initialize from baseline
+
         state = MoodState(dict(self.persona["mood"]["baseline"]), datetime.now(timezone.utc))
         self.current_state = state
         return state
@@ -288,11 +291,9 @@ class ConversationService:
             logger.warning(f"[ConversationService._save_state] Failed to save state to Redis for persona_id={self.persona['id']}: {e}")
 
     async def load_state(self) -> MoodState:
-        """Explicitly resume/load persona mood state from persistent storage."""
         return await self._load_state()
 
     async def reset_state(self) -> MoodState:
-        """Reset persona mood/internal state back to baseline in SQLite, Redis, and memory."""
         try:
             await reset_persona_state_db(self.persona["id"])
         except Exception as e:
@@ -310,17 +311,18 @@ class ConversationService:
         return self.current_state
 
     async def set_mood(self, mood_values: dict[str, float]) -> MoodState:
-        """Manually update or override specific mood dimensions."""
         current = self.current_state or await self._load_state()
         new_values = dict(current.values)
+
         for k, v in mood_values.items():
             new_values[k] = float(v)
+
         new_state = MoodState(new_values, datetime.now(timezone.utc))
+
         await self._save_state(new_state)
         return new_state
 
     async def get_state(self) -> dict[str, Any]:
-        """Return the current mood/internal state including metadata and baseline."""
         state = self.current_state or await self._load_state()
         return {
             "persona_id": self.persona["id"],
@@ -384,8 +386,10 @@ class ConversationService:
 
     async def get_presence(self) -> dict:
         presence = await self.short_memory.get_presence(self.persona["id"])
+
         if presence:
             return presence
+
         result = await self.life_tick()
         return result["presence"]
 

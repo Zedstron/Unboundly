@@ -17,6 +17,19 @@ class BridgeRegistry:
         self._bridges: dict[str, SocialBridge] = {}
         self._handlers: list[MessageHandler] = []
         self.enabled = settings.identity_mode in ( "bridge", "both" )
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    def set_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        self._loop = loop
+
+    def _get_loop(self) -> asyncio.AbstractEventLoop | None:
+        if self._loop and self._loop.is_running():
+            return self._loop
+
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            return None
 
     def register(self, name: str, bridge: SocialBridge) -> None:
         if name in self._bridges:
@@ -34,14 +47,18 @@ class BridgeRegistry:
 
         return unsubscribe
 
-    def __dispatch_message(self,  message: SocialMessage) -> None:
+    def __dispatch_message(self, message: SocialMessage) -> None:
+        loop = self._get_loop()
+
         for handler in tuple(self._handlers):
             try:
-                result = handler(message)
-
-                if inspect.isawaitable(result):
-                    asyncio.create_task(result)
-
+                if inspect.iscoroutinefunction(handler):
+                    if loop and loop.is_running():
+                        asyncio.run_coroutine_threadsafe(handler(message), loop)
+                    else:
+                        logger.error("Cannot execute async handler: No running event loop available in BridgeRegistry.")
+                else:
+                    handler(message)
             except BaseException:
                 logger.exception("social message handler failed")
 

@@ -6,6 +6,7 @@ from app.api.routes import init_services
 from app.services.workers import worker_task
 from app.infrastructure.sqlite import init_db
 from app.infrastructure.mcp import registry as mcp
+from app.services.bridges.registry import registry as bridges
 
 logger = get_logger(__name__)
 
@@ -16,6 +17,8 @@ class AppContext:
 
     async def startup(self):
         logger.debug("Application startup")
+
+        bridges.set_loop(asyncio.get_running_loop())
 
         await init_db()
         logger.info("Database initialized")
