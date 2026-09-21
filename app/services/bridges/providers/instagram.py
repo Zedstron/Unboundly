@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import os
 import asyncio
+import random
 import threading
 from datetime import datetime, timezone
 from concurrent.futures import Future
@@ -58,6 +59,17 @@ class InstagramBridge(SocialBridge):
 
         self._client: Client | None = None
         self._realtime = None
+        self._realtime_task: asyncio.Task[None] | None = None
+        self._realtime_ready: asyncio.Event | None = None
+        self._realtime_reconnect_base = float(
+            os.getenv("INSTABRIDGE_REALTIME_RECONNECT_BASE", "2")
+        )
+        self._realtime_reconnect_max = float(
+            os.getenv("INSTABRIDGE_REALTIME_RECONNECT_MAX", "60")
+        )
+        self._realtime_command_timeout = float(
+            os.getenv("INSTABRIDGE_REALTIME_COMMAND_TIMEOUT", "60")
+        )
 
         self._handlers: list[Callable[[str, dict[str, Any]], Any]] = []
 
@@ -186,16 +198,14 @@ class InstagramBridge(SocialBridge):
 
         client.dump_settings(self.session_file)
 
-        client.realtime_on("message", self._on_message)
-
-        realtime = client.realtime_connect()
-
-        state = realtime.direct_subscribe()
-
-        logger.info( "Instagram realtime connected; direct subscription active: %s", state)
-
         self._client = client
+        self._realtime_ready = asyncio.Event()
+
+        realtime, state = self._open_realtime_connection()
         self._realtime = realtime
+        self._realtime_ready.set()
+
+        logger.info("Instagram realtime connected; direct subscription active: %s", state)
 
         self._ready.set()
 
@@ -207,6 +217,9 @@ class InstagramBridge(SocialBridge):
         logger.info("Instagram bridge ready")
 
     async def _shutdown_realtime(self) -> None:
+        if self._realtime_ready is not None:
+            self._realtime_ready.clear()
+
         if self._realtime_task is not None:
             self._realtime_task.cancel()
 
@@ -217,40 +230,98 @@ class InstagramBridge(SocialBridge):
 
             self._realtime_task = None
 
-        if self._realtime is not None:
+        self._discard_realtime(self._realtime)
+        self._realtime = None
+
+    def _open_realtime_connection(self) -> tuple[Any, dict[str, Any]]:
+        client = self._require_client()
+
+        client.realtime_on("message", self._on_message)
+        realtime = client.realtime_connect()
+        return realtime, realtime.direct_subscribe()
+
+    def _discard_realtime(self, realtime: Any | None) -> None:
+        if realtime is None:
+            return
+
+        try:
+            realtime.disconnect()
+        except Exception:
+            logger.debug("failed to disconnect stale Instagram realtime client", exc_info=True)
+        finally:
+            client = self._client
+            if client is not None and getattr(client, "realtime", None) is realtime:
+                client.realtime = None
+
+    async def _reconnect_realtime(self, cause: BaseException) -> None:
+        if self._realtime_ready is not None:
+            self._realtime_ready.clear()
+
+        stale_realtime = self._realtime
+        self._realtime = None
+        await asyncio.to_thread(self._discard_realtime, stale_realtime)
+
+        attempt = 0
+        while not self._stopped.is_set():
+            attempt += 1
+            delay = min(
+                self._realtime_reconnect_base * (2 ** (attempt - 1)),
+                self._realtime_reconnect_max,
+            )
+
+            delay *= random.uniform(0.8, 1.2)
+            logger.warning("Instagram realtime disconnected (%s); reconnect attempt %d in %.1fs", cause, attempt, delay)
+            await asyncio.sleep(delay)
+
+            if self._stopped.is_set():
+                return
+
             try:
-                self._realtime.disconnect()
-            except Exception:
-                logger.exception("failed to disconnect Instagram realtime")
+                realtime, state = await asyncio.to_thread(self._open_realtime_connection)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                cause = exc
+                logger.warning(
+                    "Instagram realtime reconnect attempt %d failed: %s",
+                    attempt,
+                    exc,
+                )
+                continue
+
+            self._realtime = realtime
+            if self._realtime_ready is not None:
+                self._realtime_ready.set()
+            logger.info(
+                "Instagram realtime reconnected after %d attempt(s); direct subscription active: %s",
+                attempt,
+                state,
+            )
+            return
 
     async def _realtime_reader(self) -> None:
-        realtime = self._require_realtime()
-
         logger.info("Instagram realtime reader started")
 
         while not self._stopped.is_set():
             try:
+                realtime = self._require_realtime()
                 await asyncio.to_thread(realtime.read_once)
 
             except TimeoutError:
-                continue # eating timeout exception
+                continue
 
-            except OSError as exc:
+            except (OSError, RuntimeError) as exc:
                 if self._stopped.is_set():
                     break
 
-                logger.warning("Instagram realtime socket error: %s; reconnecting...", exc, exc_info=True)
+                await self._reconnect_realtime(exc)
 
-                await asyncio.sleep(2)
-                # TODO: Possibly reconnection attempt here
-
-            except Exception:
+            except Exception as exc:
                 if self._stopped.is_set():
                     break
 
-                logger.exception("Unexpected Instagram realtime reader error")
-
-                await asyncio.sleep(2)
+                logger.exception("Unexpected Instagram realtime reader error; reconnecting")
+                await self._reconnect_realtime(exc)
 
         logger.info("Instagram realtime reader stopped")
 
@@ -317,7 +388,7 @@ class InstagramBridge(SocialBridge):
         return await self._call(client.direct_send, text, thread_ids=[int(to)])
 
     async def _mark_seen(self, *, chat_id: str | int, message_id: str | int | None = None) -> Any:
-        realtime = self._require_realtime()
+        realtime = await self._wait_for_realtime()
 
         if message_id is None:
             raise ValueError("Instagram mark_seen requires message_id")
@@ -329,7 +400,7 @@ class InstagramBridge(SocialBridge):
         )
 
     async def _set_online(self, *, online: bool = True) -> Any:
-        realtime = self._require_realtime()
+        realtime = await self._wait_for_realtime()
 
         return await self._call(
             realtime.direct_indicate_activity,
@@ -386,7 +457,7 @@ class InstagramBridge(SocialBridge):
         reaction: str | bool,
         chat_id: str | int,
     ) -> Any:
-        realtime = self._require_realtime()
+        realtime = await self._wait_for_realtime()
 
         if reaction is False:
             return await self._call(
@@ -409,6 +480,23 @@ class InstagramBridge(SocialBridge):
             return await result
 
         return result
+
+    async def _wait_for_realtime(self) -> Any:
+        ready = self._realtime_ready
+        if ready is None:
+            raise RuntimeError("Instagram realtime client is not ready")
+
+        try:
+            await asyncio.wait_for(ready.wait(), timeout=self._realtime_command_timeout)
+        except TimeoutError as exc:
+            raise RuntimeError(
+                "Instagram realtime connection was not restored before the command timed out"
+            ) from exc
+
+        if self._stopped.is_set():
+            raise RuntimeError("instabridge is stopped")
+
+        return self._require_realtime()
 
     def _normalize_message(self, message: dict[str, Any]) -> SocialMessage | None:
         message = message.get("message")
@@ -481,7 +569,9 @@ class InstagramBridge(SocialBridge):
 
         for handler in handlers:
             try:
-                handler(message)
+                result = handler(message)
+                if inspect.isawaitable(result):
+                    asyncio.create_task(self._run_handler(result))
             except BaseException:
                 logger.exception("message handler failed")
 
