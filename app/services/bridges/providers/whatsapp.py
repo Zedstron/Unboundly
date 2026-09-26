@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import os
 import threading
+from uuid import uuid4
 from datetime import datetime, timezone
 from concurrent.futures import Future
 from collections.abc import Awaitable, Callable
@@ -299,7 +300,7 @@ class WhatsAppBridge(SocialBridge):
         if not message:
             return None
 
-        message_id = message.get("id")
+        message_id = message.get("id") or uuid4()
         sender_id = message.get("author") or message.get("from")
 
         if not message_id or not sender_id:
