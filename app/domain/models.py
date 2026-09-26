@@ -1,3 +1,4 @@
+from datetime import datetime
 from enum import StrEnum
 from typing import Any, Literal
 from pydantic import BaseModel, Field
@@ -60,4 +61,23 @@ class MemoryDecision(BaseModel):
 
 class AgentResponse(BaseModel):
     response: str = Field(..., min_length=1)
+    trust_factor: float = Field(
+        default=0.0,
+        ge=-1.0,
+        le=1.0,
+        description="Trust delta from this interaction between -1.0 and 1.0 (0 means unchanged, positive increases trust, negative decreases trust)."
+    )
     memories: list[Memory] = Field(default_factory=list)
+
+
+class ContactInfo(BaseModel):
+    id: int | None = None
+    persona_id: str
+    contact_id: str
+    name: str = "Unknown"
+    trust: float = 0.0
+    source: str | None = None
+    is_unknown: bool = False
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+

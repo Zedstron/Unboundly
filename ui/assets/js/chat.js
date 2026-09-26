@@ -60,27 +60,31 @@ function getTime() {
 }
 
 function formatPresence(presence) {
-    if (!presence || presence.online) return 'Online';
+    if (!presence) return 'offline';
+    if (presence.online) {
+        return presence.busy ? 'Busy' : 'Online';
+    }
     const lastSeen = Number(presence.last_seen || 0) * 1000;
     if (!lastSeen) return 'offline';
 
     const diffMinutes = (Date.now() - lastSeen) / 60000;
-    if (diffMinutes < 1) return 'just now';
+    if (diffMinutes < 1) return 'last seen just now';
     if (diffMinutes < 60) {
         const minutes = Math.max(1, Math.round(diffMinutes));
-        return `${minutes} min ago`;
+        return `last seen ${minutes} min ago`;
     }
 
     const diffHours = diffMinutes / 60;
     if (diffHours < 24) {
         const hours = Math.max(1, Math.round(diffHours));
-        return `${hours} hr ago`;
+        return `last seen ${hours} hr ago`;
     }
 
     const diffDays = diffHours / 24;
     const days = Math.max(1, Math.round(diffDays));
-    return `${days} day${days === 1 ? '' : 's'} ago`;
+    return `last seen ${days} day${days === 1 ? '' : 's'} ago`;
 }
+
 
 function escapeHtml(t) {
     const d = document.createElement('div');

@@ -39,6 +39,8 @@ class _SafeCreate(Create):
         if self.onStateChange:
             self.onStateChange(state)
 
+def _print_code(**payload: Any) -> None:
+    print(payload)
 
 def _print_qr(**payload: Any) -> None:
     ascii_qr = payload.get("asciiQR") or payload.get("qrCode")
@@ -87,6 +89,7 @@ class WhatsAppBridge(SocialBridge):
         self.token_dir = os.getenv("WPPBRIDGE_TOKEN_DIR") or os.path.join(os.getcwd(), "tokens")
         self.queue_size = int(os.getenv("WPPBRIDGE_QUEUE_SIZE", "1000"))
         self.headless = os.getenv("WPPBRIDGE_HEADLESS", "0") == "1"
+        self.phoneNumber = os.getenv("WPPBRIDGE_NUMBER", None)
 
         self._queue: janus.Queue[Command] = janus.Queue(
             maxsize=self.queue_size
@@ -168,7 +171,9 @@ class WhatsAppBridge(SocialBridge):
         creator = _SafeCreate(
             session=self.session,
             folderNameToken=self.token_dir,
+            phoneNumber=self.phoneNumber,
             catchQR=_print_qr,
+            catchLinkCode=_print_code,
             waitForLogin=True,
             logQR=True,
             headless=self.headless,

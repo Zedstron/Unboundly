@@ -14,6 +14,7 @@ from app.domain.behavior import BehaviorContext, BehaviorEngine
 from app.agents.persona_graph import PersonaAgentGraph
 from app.services.bridges.registry import registry
 
+from app.core.config import settings
 from app.infrastructure.sqlite import (
     clear_conversation,
     delete_message,
@@ -27,7 +28,9 @@ from app.infrastructure.sqlite import (
     save_persona_state,
     get_persona_state as get_persona_state_db,
     reset_persona_state as reset_persona_state_db,
+    get_contact,
 )
+
 
 logger = get_logger(__name__)
 
@@ -80,23 +83,26 @@ class ConversationService:
             up_to_message_id=up_to_message_id,
         )
         if seen_ids:
-            channel = f"persona:out:{self.persona['id']}:{conversation_id}"
-            for mid in seen_ids:
-                logger.debug(f"[ConversationService.mark_conversation_seen] Publishing seen status: message_id={mid}, conversation_id={conversation_id}")
+            if source is None or source == "local":
+                channel = f"persona:out:{self.persona['id']}:{conversation_id}"
+                for mid in seen_ids:
+                    logger.debug(f"[ConversationService.mark_conversation_seen] Publishing seen status: message_id={mid}, conversation_id={conversation_id}")
 
-                await self.short_memory.redis.publish(
-                    channel,
-                    json.dumps({
-                        "type": "status",
-                        "persona_id": self.persona["id"],
-                        "conversation_id": conversation_id,
-                        "message_id": mid,
-                        "status": "seen",
-                    }),
-                )
+                    await self.short_memory.redis.publish(
+                        channel,
+                        json.dumps({
+                            "type": "status",
+                            "persona_id": self.persona["id"],
+                            "conversation_id": conversation_id,
+                            "message_id": mid,
+                            "status": "seen",
+                        }),
+                    )
 
-            await self.__bridge_signal(Operation.MARK_SEEN, source=source, chat_id=conversation_id)
+            if source and source != "local":
+                await self.__bridge_signal(Operation.MARK_SEEN, source=source, chat_id=conversation_id)
         return seen_ids
+
 
     async def ingest(self, message: SocialMessage) -> dict:
         logger.info(f"[ConversationService.ingest] Starting ingestion: persona_id={self.persona['id']}, conversation_id={message.chat_id}, text_length={len(message.text)}")
@@ -136,6 +142,17 @@ class ConversationService:
 
             logger.debug(f"[ConversationService.ingest] User message saved: message_id={message_id}")
 
+            # Check contact existence
+            contact_id = message.sender_id or message.chat_id
+            contact = await get_contact(self.persona["id"], contact_id)
+            if contact is None and contact_id != message.chat_id:
+                contact = await get_contact(self.persona["id"], message.chat_id)
+
+            is_unknown = (contact is None)
+            if is_unknown and not settings.reply_unknown_contacts:
+                logger.info(f"[ConversationService.ingest] Unknown contact ({contact_id}) and reply_unknown_contacts is disabled. Skipping reply.")
+                return { "message_id": message_id }
+
             ctx = BehaviorContext(
                 hour=self._local_now().hour,
                 idle_minutes=0,
@@ -162,7 +179,8 @@ class ConversationService:
                         "persona_id": self.persona["id"],
                         "user_message_id": message_id,
                         "source": message.provider,
-                        "sender_id": message.sender_id
+                        "sender_id": message.sender_id,
+                        "sender_name": message.sender_name,
                     },
                     due,
                 )
@@ -178,7 +196,8 @@ class ConversationService:
                     "persona_id": self.persona["id"],
                     "user_message_id": message_id,
                     "source": message.provider,
-                    "sender_id": message.sender_id
+                    "sender_id": message.sender_id,
+                    "sender_name": message.sender_name,
                 },
                 time(),
             )
@@ -189,14 +208,24 @@ class ConversationService:
             logger.error(f"[ConversationService.ingest] Error during ingest: {e}", exc_info=True)
             raise
 
-    async def generate_reply(self, conversation_id: str, initiative: str | None = None, source: str = None) -> str:
+    async def generate_reply(
+        self,
+        conversation_id: str,
+        initiative: str | None = None,
+        source: str = None,
+        sender_id: str | None = None,
+        sender_name: str | None = None,
+        text: str | None = None,
+    ) -> str:
         logger.info(f"[ConversationService.generate_reply] Generating reply for conversation_id={conversation_id}, persona_id={self.persona['id']}")
         try:
             logger.debug(f"[ConversationService.generate_reply] Marking conversation messages as seen before typing")
             await self.mark_conversation_seen(conversation_id, source=source)
 
-            logger.debug(f"[ConversationService.generate_reply] Publishing typing indicator")
-            await self.short_memory.publish_typing(self.persona["id"], conversation_id, True)
+            # Route typing indicator ONLY to local UI if source is local
+            if source is None or source == "local":
+                logger.debug(f"[ConversationService.generate_reply] Publishing typing indicator to UI")
+                await self.short_memory.publish_typing(self.persona["id"], conversation_id, True)
 
             try:
                 logger.debug(f"[ConversationService.generate_reply] Invoking persona LangGraph")
@@ -207,17 +236,23 @@ class ConversationService:
                     conversation_id,
                     state.values,
                     initiative=initiative,
+                    sender_id=sender_id,
+                    sender_name=sender_name,
+                    source=source,
+                    text=text,
                 )
                 elapsed = time_module.time() - start
 
                 logger.info(f"[ConversationService.generate_reply] AI reply generated in {elapsed:.2f}s: conversation_id={conversation_id}, reply_length={len(reply)}")
                 return reply
             finally:
-                logger.debug(f"[ConversationService.generate_reply] Clearing typing indicator")
-                await self.short_memory.publish_typing(self.persona["id"], conversation_id, False)
+                if source is None or source == "local":
+                    logger.debug(f"[ConversationService.generate_reply] Clearing typing indicator")
+                    await self.short_memory.publish_typing(self.persona["id"], conversation_id, False)
         except Exception as e:
             logger.error(f"[ConversationService.generate_reply] Error generating reply: {e}", exc_info=True)
             raise
+
 
     async def _load_state(self) -> MoodState:
         try:
@@ -348,11 +383,8 @@ class ConversationService:
             
             previous = await self.short_memory.get_presence(self.persona["id"])
             online = random.random() < probability
-            if previous and previous.get("online") and random.random() < 0.75:
-                online = True
-                logger.debug(f"[ConversationService.life_tick] Persona stays online with 75% probability")
-
             busy = online and random.random() < self.behavior.busy_probability(local_now.hour, state)
+
 
             changed = (
                 not previous
@@ -413,6 +445,17 @@ class ConversationService:
 
                 logger.debug(f"[ConversationService.process_unread_messages] Processing message: message_id={message['id']}, conversation_id={message['conversation_id']}, content={message['content'][:50]}...")
                 
+                # Check contact existence
+                contact_id = message.get("sender_id") or message["conversation_id"]
+                contact = await get_contact(self.persona["id"], contact_id)
+                if contact is None and contact_id != message["conversation_id"]:
+                    contact = await get_contact(self.persona["id"], message["conversation_id"])
+
+                is_unknown = (contact is None)
+                if is_unknown and not settings.reply_unknown_contacts:
+                    logger.info(f"[ConversationService.process_unread_messages] Unknown contact ({contact_id}) and reply_unknown_contacts is disabled. Skipping reply.")
+                    continue
+
                 event = await self._classify_event(message["content"])
                 state = self.mood.update(state, event)
 
@@ -465,7 +508,9 @@ class ConversationService:
                             "persona_id": self.persona["id"],
                             "user_message_id": action["message_id"],
                             "source": action["source"],
-                            "sender_id": action["sender_id"]
+                            "sender_id": action["sender_id"],
+                            "sender_name": action["sender_name"],
+                            "text": action["content"],
                         },
                         time() + delay,
                     )
@@ -478,12 +523,15 @@ class ConversationService:
                             "persona_id": self.persona["id"],
                             "user_message_id": action["message_id"],
                             "source": action["source"],
-                            "sender_id": action["sender_id"]
+                            "sender_id": action["sender_id"],
+                            "sender_name": action["sender_name"],
+                            "text": action["content"],
                         },
                         time(),
                     )
                 else:
                     logger.debug(f"[ConversationService.process_unread_messages] No action needed: decision={action['decision']}")
+
 
             logger.info(f"[ConversationService.process_unread_messages] Processed {len(actions)} unread messages")
             return actions

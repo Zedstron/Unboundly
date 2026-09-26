@@ -41,6 +41,10 @@ class PersonaAgentGraph:
         self.persona = persona
         self.graph = self._build_graph()
 
+    def rebuild_graph(self) -> None:
+        self.graph = self._build_graph()
+
+
 
     async def classify_event(self, text: str, allowed_events: Sequence[str]) -> str:
         result = await self.graph.ainvoke(
@@ -57,6 +61,10 @@ class PersonaAgentGraph:
         conversation_id: str,
         mood: dict[str, float],
         initiative: str | None = None,
+        sender_id: str | None = None,
+        sender_name: str | None = None,
+        source: str | None = None,
+        text: str | None = None,
     ) -> str:
         result = await self.graph.ainvoke(
             {
@@ -64,9 +72,14 @@ class PersonaAgentGraph:
                 "conversation_id": conversation_id,
                 "mood": mood,
                 "initiative": initiative,
+                "sender_id": sender_id,
+                "sender_name": sender_name,
+                "source": source,
+                "text": text,
             }
         )
         return result["reply"]
+
 
 
     def _build_graph(self):

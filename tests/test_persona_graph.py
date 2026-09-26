@@ -37,15 +37,22 @@ async def _run_graph(monkeypatch):
     agent.ai = FakeAI()
     agent.short_memory = FakeShortMemory()
     agent.long_memory = FakeLongMemory()
+    agent.rebuild_graph()
+
 
     async def fake_history(_persona_id, _conversation_id, limit):
         assert limit == 15
         return [{"direction": "user", "content": "you are cute"}]
 
-    monkeypatch.setattr("app.agents.persona_graph.get_conversation", fake_history)
+    async def fake_contact(_persona_id, _contact_id):
+        return None
+
+    monkeypatch.setattr("app.agents.nodes.memory_fetch.get_conversation", fake_history)
+    monkeypatch.setattr("app.agents.nodes.memory_fetch.get_contact", fake_contact)
 
     event = await agent.classify_event("you are cute", ["compliment", "conflict"])
     reply = await agent.generate_reply("conversation", {"valence": 0.4})
+
 
     assert event == "compliment"
     assert reply == "that is sweet"

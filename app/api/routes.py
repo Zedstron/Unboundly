@@ -337,3 +337,90 @@ async def get_personas(conversation_id: str):
     except Exception as exc:
         logger.error(f"[get_personas] Error fetching personas: conversation_id={conversation_id}, error={exc}", exc_info=True)
         raise HTTPException(502, detail=str(exc)) from exc
+
+
+@router.get("/{pid}/contacts")
+async def get_contacts_endpoint(pid: str):
+    from app.infrastructure.sqlite import list_contacts
+    try:
+        return await list_contacts(pid)
+    except Exception as exc:
+        logger.error(f"[get_contacts] Error listing contacts for {pid}: {exc}", exc_info=True)
+        raise HTTPException(500, detail=str(exc)) from exc
+
+
+@router.get("/{pid}/contacts/{contact_id}")
+async def get_contact_endpoint(pid: str, contact_id: str):
+    from app.infrastructure.sqlite import get_contact
+    try:
+        contact = await get_contact(pid, contact_id)
+        if contact is None:
+            raise HTTPException(404, detail="Contact not found")
+        return contact
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"[get_contact] Error retrieving contact {contact_id}: {exc}", exc_info=True)
+        raise HTTPException(500, detail=str(exc)) from exc
+
+
+@router.post("/{pid}/contacts")
+@router.put("/{pid}/contacts/{contact_id}")
+async def save_contact_endpoint(pid: str, contact_id: str = None, payload: dict = Body(...)):
+    from app.infrastructure.sqlite import save_or_update_contact
+    cid = contact_id or payload.get("contact_id")
+    if not cid:
+        raise HTTPException(400, detail="contact_id is required")
+
+    name = payload.get("name", "Unknown")
+    trust = float(payload.get("trust", 0.0))
+    source = payload.get("source")
+
+    try:
+        saved = await save_or_update_contact(
+            persona_id=pid,
+            contact_id=cid,
+            name=name,
+            trust=trust,
+            source=source,
+        )
+        return saved
+    except Exception as exc:
+        logger.error(f"[save_contact] Error saving contact {cid}: {exc}", exc_info=True)
+        raise HTTPException(500, detail=str(exc)) from exc
+
+
+@router.patch("/{pid}/contacts/{contact_id}/trust")
+async def update_contact_trust_endpoint(pid: str, contact_id: str, payload: dict = Body(...)):
+    from app.infrastructure.sqlite import update_contact_trust
+    delta = float(payload.get("delta", 0.0))
+    name = payload.get("name")
+    source = payload.get("source")
+
+    try:
+        updated = await update_contact_trust(
+            persona_id=pid,
+            contact_id=contact_id,
+            delta=delta,
+            name=name,
+            source=source,
+        )
+        return updated
+    except Exception as exc:
+        logger.error(f"[update_contact_trust] Error updating trust for {contact_id}: {exc}", exc_info=True)
+        raise HTTPException(500, detail=str(exc)) from exc
+
+
+@router.delete("/{pid}/contacts/{contact_id}")
+async def delete_contact_endpoint(pid: str, contact_id: str):
+    from app.infrastructure.sqlite import delete_contact
+    try:
+        deleted = await delete_contact(pid, contact_id)
+        if not deleted:
+            raise HTTPException(404, detail="Contact not found")
+        return {"deleted": True, "contact_id": contact_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(f"[delete_contact] Error deleting contact {contact_id}: {exc}", exc_info=True)
+        raise HTTPException(500, detail=str(exc)) from exc

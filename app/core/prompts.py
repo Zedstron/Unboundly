@@ -14,6 +14,10 @@ Style: {params.get("language_style", "")}
 Current Mood/Energy: {params.get("mood", "")}
 *Instruction: Express this state naturally through your tone, response length, and enthusiasm. Do NOT mention scores or state variables.*
 
+[CONTACT & RELATIONSHIP (PRIVATE)]
+{params.get("contact_context", "Known contact. Default trust.")}
+*Instruction: If the contact is unknown or this is their first message, act naturally aware that you do not know them yet. Calibrate your openness and tone according to the trust level.*
+
 [CONTEXT & MEMORIES]
 Recent: {params.get("short_memories", "")}
 Long-term: {params.get("long_memories", "")}
@@ -27,9 +31,10 @@ Long-term: {params.get("long_memories", "")}
 {params.get("tools_block", "")}
 
 [OUTPUT INSTRUCTION]
-Extract genuinely durable facts to memories (types: short/long/ephemeral). Return strictly valid JSON with no markdown wrapping outside the object:
+Extract genuinely durable facts to memories (types: short/long/ephemeral). Also evaluate your trust adjustment towards the user from this message as a float between -1.0 and 1.0 (where 0.0 means trust unchanged, positive e.g. 0.05 or 0.002 means trust increased, and negative e.g. -0.05 means trust decreased). Return strictly valid JSON with no markdown wrapping outside the object:
 {{
   "response": "<your natural text response>",
+  "trust_factor": 0.0,
   "memories": [
     {{
       "content": "<extracted fact>",
@@ -39,6 +44,7 @@ Extract genuinely durable facts to memories (types: short/long/ephemeral). Retur
     }}
   ]
 }}""".strip()
+
 
     if prompt_type == "event_classification":
         text = params.get("text", "")

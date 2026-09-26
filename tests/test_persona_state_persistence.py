@@ -121,13 +121,13 @@ async def test_persona_mood_resumes_across_restarts():
     # 2. Persona encounters conflict and becomes angry
     state_after_conflict = service_1.mood.update(initial_state, "conflict")
     await service_1._save_state(state_after_conflict)
-    assert state_after_conflict.values["irritability"] == 0.7
-    assert state_after_conflict.values["valence"] == 0.1
+    assert state_after_conflict.values["irritability"] == pytest.approx(0.7)
+    assert state_after_conflict.values["valence"] == pytest.approx(0.1)
 
     # Verify state was saved to SQLite
     in_db = await get_persona_state("test_persona")
     assert in_db is not None
-    assert in_db["mood"]["irritability"] == 0.7
+    assert in_db["mood"]["irritability"] == pytest.approx(0.7)
 
     # 3. Simulate process termination and restart:
     # Service instance is discarded. Fresh service instance is created.
@@ -138,9 +138,10 @@ async def test_persona_mood_resumes_across_restarts():
     resumed_state = await service_restarted.load_state()
 
     # The persona MUST resume its angry state rather than resetting to baseline 0.1!
-    assert resumed_state.values["irritability"] == 0.7
-    assert resumed_state.values["valence"] == 0.1
+    assert resumed_state.values["irritability"] == pytest.approx(0.7)
+    assert resumed_state.values["valence"] == pytest.approx(0.1)
     assert resumed_state.updated_at.tzinfo is not None
+
 
 
 @pytest.mark.asyncio

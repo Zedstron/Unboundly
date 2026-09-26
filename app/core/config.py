@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     log_file_path: str = None
     mcp_server_urls: str = ""
     identity_mode: str = "local"
+    reply_unknown_contacts: bool = False
 
     @property
     def mcp_server_url_list(self) -> list[str]:

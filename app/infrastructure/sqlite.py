@@ -10,7 +10,8 @@ from sqlalchemy.ext.asyncio import (
     async_sessionmaker,
     create_async_engine,
 )
-from app.core.models import ConversationMessage, PersonaState, Base
+from app.core.models import ConversationMessage, PersonaState, Contact, Base
+
 
 BASE_DIR = Path(__file__).resolve().parents[2]
 
@@ -389,3 +390,165 @@ async def get_all_persona_states() -> list[dict[str, Any]]:
                 "updated_at": updated_at,
             })
         return states
+
+
+async def get_contact(persona_id: str, contact_id: str) -> dict[str, Any] | None:
+    async with SessionFactory() as session:
+        result = await session.execute(
+            select(Contact).where(
+                Contact.persona_id == persona_id,
+                Contact.contact_id == contact_id,
+            ).limit(1)
+        )
+        row = result.scalars().first()
+        if row is None:
+            return None
+
+        return {
+            "id": row.id,
+            "persona_id": row.persona_id,
+            "contact_id": row.contact_id,
+            "name": row.name,
+            "trust": float(row.trust),
+            "source": row.source,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        }
+
+
+async def save_or_update_contact(
+    persona_id: str,
+    contact_id: str,
+    name: str = "Unknown",
+    trust: float = 0.0,
+    source: str | None = None,
+) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    clamped_trust = max(-1.0, min(1.0, float(trust)))
+
+    async with SessionFactory() as session:
+        result = await session.execute(
+            select(Contact).where(
+                Contact.persona_id == persona_id,
+                Contact.contact_id == contact_id,
+            ).limit(1)
+        )
+        row = result.scalars().first()
+        if row is None:
+            row = Contact(
+                persona_id=persona_id,
+                contact_id=contact_id,
+                name=name,
+                trust=clamped_trust,
+                source=source,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+        else:
+            if name and name != "Unknown":
+                row.name = name
+            row.trust = clamped_trust
+            if source:
+                row.source = source
+            row.updated_at = now
+
+        await session.commit()
+        await session.refresh(row)
+        return {
+            "id": row.id,
+            "persona_id": row.persona_id,
+            "contact_id": row.contact_id,
+            "name": row.name,
+            "trust": float(row.trust),
+            "source": row.source,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        }
+
+
+async def update_contact_trust(
+    persona_id: str,
+    contact_id: str,
+    delta: float,
+    name: str | None = None,
+    source: str | None = None,
+) -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    async with SessionFactory() as session:
+        result = await session.execute(
+            select(Contact).where(
+                Contact.persona_id == persona_id,
+                Contact.contact_id == contact_id,
+            ).limit(1)
+        )
+        row = result.scalars().first()
+        if row is None:
+            new_trust = max(-1.0, min(1.0, float(delta)))
+            row = Contact(
+                persona_id=persona_id,
+                contact_id=contact_id,
+                name=name or "Unknown",
+                trust=new_trust,
+                source=source,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(row)
+        else:
+            new_trust = max(-1.0, min(1.0, float(row.trust) + float(delta)))
+            row.trust = new_trust
+            if name and name != "Unknown":
+                row.name = name
+            if source:
+                row.source = source
+            row.updated_at = now
+
+        await session.commit()
+        await session.refresh(row)
+        return {
+            "id": row.id,
+            "persona_id": row.persona_id,
+            "contact_id": row.contact_id,
+            "name": row.name,
+            "trust": float(row.trust),
+            "source": row.source,
+            "created_at": row.created_at,
+            "updated_at": row.updated_at,
+        }
+
+
+async def list_contacts(persona_id: str | None = None) -> list[dict[str, Any]]:
+    async with SessionFactory() as session:
+        query = select(Contact)
+        if persona_id is not None:
+            query = query.where(Contact.persona_id == persona_id)
+        query = query.order_by(Contact.name.asc(), Contact.id.asc())
+        result = await session.execute(query)
+        rows = result.scalars().all()
+        return [
+            {
+                "id": r.id,
+                "persona_id": r.persona_id,
+                "contact_id": r.contact_id,
+                "name": r.name,
+                "trust": float(r.trust),
+                "source": r.source,
+                "created_at": r.created_at,
+                "updated_at": r.updated_at,
+            }
+            for r in rows
+        ]
+
+
+async def delete_contact(persona_id: str, contact_id: str) -> bool:
+    async with SessionFactory() as session:
+        result = await session.execute(
+            delete(Contact).where(
+                Contact.persona_id == persona_id,
+                Contact.contact_id == contact_id,
+            )
+        )
+        await session.commit()
+        return result.rowcount > 0
+
