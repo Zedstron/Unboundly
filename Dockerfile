@@ -6,19 +6,22 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# 1. Install CPU-only PyTorch first (Drops image size from ~5GB to ~200MB, eliminates nvidia-* packages)
-RUN pip install --upgrade pip && \
-    pip install torch --index-url https://download.pytorch.org/whl/cpu
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
 
-# 2. Copy dependency files first to maximize Docker layer caching
+RUN pip install --upgrade pip && pip install torch --index-url https://download.pytorch.org/whl/cpu
+
 COPY pyproject.toml requirements.txt ./
 
-# 3. Install remaining dependencies using PyTorch CPU wheel repo
 RUN pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
 
-# 4. Copy source code and install project package
 COPY . .
+
 RUN pip install --no-deps -e .
+
+RUN playwright install --with-deps chrome
 
 RUN mkdir -p /app/data
 

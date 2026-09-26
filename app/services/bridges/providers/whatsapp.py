@@ -179,7 +179,8 @@ class WhatsAppBridge(SocialBridge):
             headless=self.headless,
             no_viewport=True,
             bypass_csp=True,
-            install=False
+            install=False,
+            browser="chrome"
         )
 
         self._creator = creator
