@@ -22,8 +22,7 @@ dependencies = [
   "jinja2",
   "WPP_Whatsapp",
   "tzdata",
-  "instagrapi",
-  "sentence_transformers"
+  "instagrapi"
 ]
 
 [project.optional-dependencies]
