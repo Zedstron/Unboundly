@@ -22,6 +22,7 @@ from app.infrastructure.sqlite import (
     get_conversation,
     get_inactive_conversations,
     get_last_message,
+    get_last_user_message,
     mark_message_seen_for_persona,
     mark_messages_seen,
     save_message,
@@ -104,6 +105,30 @@ class ConversationService:
         return seen_ids
 
 
+    async def _contact_is_unknown(
+        self,
+        conversation_id: str,
+        sender_id: str | None = None,
+    ) -> bool:
+        """A conversation is unknown unless a vetted (non-unknown) contact matches it.
+
+        Checks both the sender-scoped contact and the conversation-scoped one,
+        treating the conversation as known if either has been vetted. Contacts
+        auto-created by the reply pipeline keep ``is_unknown=True`` until they
+        are explicitly saved with a real name.
+        """
+        persona_id = self.persona["id"]
+        candidate_ids = [conversation_id]
+        if sender_id and sender_id != conversation_id:
+            candidate_ids.insert(0, sender_id)
+
+        for contact_id in candidate_ids:
+            contact = await get_contact(persona_id, contact_id)
+            if contact is not None and not bool(contact.get("is_unknown")):
+                return False
+
+        return True
+
     async def ingest(self, message: SocialMessage) -> dict:
         logger.info(f"[ConversationService.ingest] Starting ingestion: persona_id={self.persona['id']}, conversation_id={message.chat_id}, text_length={len(message.text)}")
         try:
@@ -122,9 +147,6 @@ class ConversationService:
             await self._save_state(state)
             logger.debug(f"[ConversationService.ingest] Mood state saved for persona_id={self.persona['id']}")
 
-            # Presence is the input to the behaviour decision, never an
-            # effect of generating a reply.  Initialise it if the worker has
-            # not yet performed its first life tick.
             presence = await self.get_presence()
             logger.debug(f"[ConversationService.ingest] Presence retrieved: online={presence.get('online') if presence else 'unknown'}")
 
@@ -144,12 +166,7 @@ class ConversationService:
 
             # Check contact existence
             contact_id = message.sender_id or message.chat_id
-            contact = await get_contact(self.persona["id"], contact_id)
-            if contact is None and contact_id != message.chat_id:
-                contact = await get_contact(self.persona["id"], message.chat_id)
-
-            is_unknown = (contact is None)
-            if is_unknown and not settings.reply_unknown_contacts:
+            if await self._contact_is_unknown(message.chat_id, message.sender_id) and not settings.reply_unknown_contacts:
                 logger.info(f"[ConversationService.ingest] Unknown contact ({contact_id}) and reply_unknown_contacts is disabled. Skipping reply.")
                 return { "message_id": message_id }
 
@@ -447,12 +464,7 @@ class ConversationService:
                 
                 # Check contact existence
                 contact_id = message.get("sender_id") or message["conversation_id"]
-                contact = await get_contact(self.persona["id"], contact_id)
-                if contact is None and contact_id != message["conversation_id"]:
-                    contact = await get_contact(self.persona["id"], message["conversation_id"])
-
-                is_unknown = (contact is None)
-                if is_unknown and not settings.reply_unknown_contacts:
+                if await self._contact_is_unknown(message["conversation_id"], message.get("sender_id")) and not settings.reply_unknown_contacts:
                     logger.info(f"[ConversationService.process_unread_messages] Unknown contact ({contact_id}) and reply_unknown_contacts is disabled. Skipping reply.")
                     continue
 
@@ -592,6 +604,15 @@ class ConversationService:
         if not candidates:
             return 0
 
+        if not settings.reply_unknown_contacts:
+            candidates = [
+                candidate
+                for candidate in candidates
+                if not await self._contact_is_unknown(candidate["conversation_id"])
+            ]
+            if not candidates:
+                return 0
+
         daily_budget = max(0, int(cfg.get("daily_budget", 1)))
         day_key = local_now.date().isoformat()
         sent_key = f"persona:follow-up:count:{self.persona['id']}:{day_key}"
@@ -638,13 +659,27 @@ class ConversationService:
         trigger = random.choices(valid_triggers, weights=weights if any(weights) else None, k=1)[0]
         delay = self._sample_duration(cfg.get("delay_seconds"), default=60)
 
+        # Carry the conversation's transport metadata so the worker can route
+        # the autonomous message back through the same bridge (WhatsApp,
+        # Instagram, ...) instead of only the local inbox.
+        last_user_message = await get_last_user_message(self.persona["id"], conversation_id)
+
+        payload = {
+            "conversation_id": conversation_id,
+            "persona_id": self.persona["id"],
+            "trigger": trigger["type"],
+        }
+        if last_user_message:
+            if last_user_message.get("source"):
+                payload["source"] = last_user_message["source"]
+            if last_user_message.get("sender_id"):
+                payload["sender_id"] = last_user_message["sender_id"]
+            if last_user_message.get("sender_name"):
+                payload["sender_name"] = last_user_message["sender_name"]
+
         await self.short_memory.schedule(
             "follow_up",
-            {
-                "conversation_id": conversation_id,
-                "persona_id": self.persona["id"],
-                "trigger": trigger["type"],
-            },
+            payload,
             time() + delay,
         )
         logger.info(

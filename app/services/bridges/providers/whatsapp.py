@@ -7,6 +7,7 @@ import asyncio
 import inspect
 import os
 import threading
+from datetime import datetime, timezone
 from concurrent.futures import Future
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -63,24 +64,6 @@ class Command:
     args: tuple[Any, ...]
     kwargs: dict[str, Any]
     future: Future
-
-
-class AwaitableFuture:
-    def __init__(self, future: Future):
-        self._future = future
-
-    def result(self, timeout: float | None = None) -> Any:
-        return self._future.result(timeout)
-
-    def done(self) -> bool:
-        return self._future.done()
-
-    def __await__(self):
-        async def wait():
-            loop = asyncio.get_running_loop()
-            return await asyncio.wrap_future(self._future, loop=loop)
-
-        return wait().__await__()
 
 
 class WhatsAppBridge(SocialBridge):
@@ -283,7 +266,13 @@ class WhatsAppBridge(SocialBridge):
             caption,
         )
 
-    async def _send_reaction(self, *, message_id: str, reaction: str | bool) -> Any:
+    async def _send_reaction(
+        self,
+        *,
+        message_id: str | int,
+        reaction: str | bool,
+        chat_id: str | int | None = None,
+    ) -> Any:
         async def operation():
             return await self._client.ThreadsafeBrowser.page_evaluate(
                 """({ messageId, reaction }) =>
@@ -298,38 +287,75 @@ class WhatsAppBridge(SocialBridge):
 
         return await self._call(operation)
 
-    async def _call(self, function: Callable[..., Any], *args: Any) -> Any:
-        result = function(*args)
+    async def _call(self, function: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        result = function(*args, **kwargs)
 
         if inspect.isawaitable(result):
             return await result
 
         return result
 
-    def _normalize_message(self, message: dict[str, Any]) -> SocialMessage:
+    def _normalize_message(self, message: dict[str, Any]) -> SocialMessage | None:
+        if not message:
+            return None
+
+        message_id = message.get("id")
+        sender_id = message.get("author") or message.get("from")
+
+        if not message_id or not sender_id:
+            return None
+
+        if message.get("fromMe"):
+            return None
+
         return SocialMessage(
             provider="whatsapp",
             session=self.session,
-            message_id=str(message.get("id", "")),
-            chat_id=str(message.get("from", "")),
-            sender_id=str(message.get("author") or message.get("from", "")),
+            message_id=str(message_id),
+            message_type=str(message.get("type") or "chat"),
+            item_id=str(message.get("itemId") or message.get("mediaKey") or message_id),
+            chat_id=str(message.get("from") or ""),
+            is_disappearing=bool(message.get("isEphemeral") or message.get("isDisappearing")),
+            sender_id=str(sender_id),
             sender_name=message.get("notifyName"),
-            text=message.get("body", ""),
-            timestamp=self._parse_timestamp(
-                message.get("timestamp")
-            ),
+            text=str(message.get("body") or message.get("caption") or ""),
+            timestamp=self._parse_timestamp(message.get("timestamp") or message.get("t")),
             raw=message,
         )
 
+    def _parse_timestamp(self, value: Any) -> datetime | None:
+        if value is None:
+            return None
+
+        if isinstance(value, datetime):
+            return value
+
+        if isinstance(value, (int, float)):
+            value = float(value)
+
+            # Detect timestamp precision by magnitude
+            if value > 1e14:
+                value /= 1_000_000
+            elif value > 1e11:
+                value /= 1_000
+
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+
+        return None
+
     def _on_message(self, message: dict[str, Any]) -> None:
+        if message:
+            event = self._normalize_message(message)
+            if event:
+                self._dispatch_message(event)
+
+    def _dispatch_message(self, message: SocialMessage) -> None:
         with self._handlers_lock:
             handlers = tuple(self._handlers)
 
-        message = self._normalize_message(message)
-
         for handler in handlers:
             try:
-                result = handler(self.session, message)
+                result = handler(message)
 
                 if inspect.isawaitable(result):
                     asyncio.create_task(self._run_handler(result))
@@ -350,6 +376,7 @@ class WhatsAppBridge(SocialBridge):
 
         self._queue.sync_q.put(
             Command(
+                session=self.session,
                 operation=Operation.STOP_SERVICE,
                 args=(),
                 kwargs={},

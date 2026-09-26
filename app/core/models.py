@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from sqlalchemy import DateTime, Integer, String, Text, Index, JSON
+from sqlalchemy import Boolean, DateTime, Integer, String, Text, Index, JSON
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 class Base(DeclarativeBase):
@@ -50,6 +50,7 @@ class Contact(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False, default="Unknown")
     trust: Mapped[float] = mapped_column(default=0.0, nullable=False)
     source: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    is_unknown: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

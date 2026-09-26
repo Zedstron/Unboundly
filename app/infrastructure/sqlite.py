@@ -44,6 +44,18 @@ async def init_db() -> None:
             if name not in columns:
                 await connection.execute(text(f"ALTER TABLE conversation_messages ADD COLUMN {name} {definition}"))
 
+        contact_columns = {
+            row[1] for row in (await connection.execute(text("PRAGMA table_info(contacts)"))).all()
+        }
+        if "is_unknown" not in contact_columns:
+            await connection.execute(text("ALTER TABLE contacts ADD COLUMN is_unknown BOOLEAN NOT NULL DEFAULT 1"))
+            # Backfill: contacts that already have a real name were vetted; the
+            # rest stay unknown so unvetted contacts are not auto-replied to.
+            await connection.execute(text(
+                "UPDATE contacts SET is_unknown = 0 "
+                "WHERE name IS NOT NULL AND TRIM(name) <> '' AND LOWER(TRIM(name)) <> 'unknown'"
+            ))
+
 
 async def save_message(
     persona_id: str,
@@ -318,6 +330,36 @@ async def get_last_message(persona_id: str, conversation_id: str) -> dict:
         return result.scalars().first()
 
 
+async def get_last_user_message(persona_id: str, conversation_id: str) -> dict[str, Any] | None:
+    """Return the most recent inbound message's routing metadata for a conversation."""
+    async with SessionFactory() as session:
+        result = await session.execute(
+            select(ConversationMessage)
+            .where(
+                ConversationMessage.persona_id == persona_id,
+                ConversationMessage.conversation_id == conversation_id,
+                ConversationMessage.direction == "user",
+            )
+            .order_by(
+                ConversationMessage.created_at.desc(),
+                ConversationMessage.id.desc(),
+            )
+            .limit(1)
+        )
+        message = result.scalars().first()
+        if message is None:
+            return None
+
+        return {
+            "id": message.id,
+            "content": message.content,
+            "source": message.source,
+            "sender_id": message.sender_id,
+            "sender_name": message.sender_name,
+            "created_at": message.created_at,
+        }
+
+
 async def save_persona_state(
     persona_id: str,
     mood: dict[str, float],
@@ -411,9 +453,15 @@ async def get_contact(persona_id: str, contact_id: str) -> dict[str, Any] | None
             "name": row.name,
             "trust": float(row.trust),
             "source": row.source,
+            "is_unknown": bool(row.is_unknown),
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }
+
+
+def _default_is_unknown(name: str | None) -> bool:
+    """A name that is missing or the placeholder means the contact is unvetted."""
+    return not name or name.strip().lower() == "unknown"
 
 
 async def save_or_update_contact(
@@ -422,7 +470,14 @@ async def save_or_update_contact(
     name: str = "Unknown",
     trust: float = 0.0,
     source: str | None = None,
+    is_unknown: bool | None = None,
 ) -> dict[str, Any]:
+    """Explicitly create/update a contact.
+
+    When ``is_unknown`` is omitted it is inferred for new contacts from the
+    name (a real name marks the contact as known) and preserved for existing
+    contacts so an explicit save does not silently flip its status.
+    """
     now = datetime.now(timezone.utc)
     clamped_trust = max(-1.0, min(1.0, float(trust)))
 
@@ -441,6 +496,7 @@ async def save_or_update_contact(
                 name=name,
                 trust=clamped_trust,
                 source=source,
+                is_unknown=_default_is_unknown(name) if is_unknown is None else bool(is_unknown),
                 created_at=now,
                 updated_at=now,
             )
@@ -451,6 +507,8 @@ async def save_or_update_contact(
             row.trust = clamped_trust
             if source:
                 row.source = source
+            if is_unknown is not None:
+                row.is_unknown = bool(is_unknown)
             row.updated_at = now
 
         await session.commit()
@@ -462,6 +520,7 @@ async def save_or_update_contact(
             "name": row.name,
             "trust": float(row.trust),
             "source": row.source,
+            "is_unknown": bool(row.is_unknown),
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }
@@ -473,7 +532,15 @@ async def update_contact_trust(
     delta: float,
     name: str | None = None,
     source: str | None = None,
+    is_unknown: bool | None = None,
 ) -> dict[str, Any]:
+    """Adjust a contact's trust after an interaction.
+
+    This also runs for contacts the persona already replied to, so newly
+    created rows stay flagged ``is_unknown=True`` (and existing rows keep
+    their status) unless the caller explicitly overrides it. That prevents a
+    reply from silently un-vetting a contact.
+    """
     now = datetime.now(timezone.utc)
     async with SessionFactory() as session:
         result = await session.execute(
@@ -491,6 +558,7 @@ async def update_contact_trust(
                 name=name or "Unknown",
                 trust=new_trust,
                 source=source,
+                is_unknown=True if is_unknown is None else bool(is_unknown),
                 created_at=now,
                 updated_at=now,
             )
@@ -502,6 +570,8 @@ async def update_contact_trust(
                 row.name = name
             if source:
                 row.source = source
+            if is_unknown is not None:
+                row.is_unknown = bool(is_unknown)
             row.updated_at = now
 
         await session.commit()
@@ -513,6 +583,7 @@ async def update_contact_trust(
             "name": row.name,
             "trust": float(row.trust),
             "source": row.source,
+            "is_unknown": bool(row.is_unknown),
             "created_at": row.created_at,
             "updated_at": row.updated_at,
         }
@@ -534,6 +605,7 @@ async def list_contacts(persona_id: str | None = None) -> list[dict[str, Any]]:
                 "name": r.name,
                 "trust": float(r.trust),
                 "source": r.source,
+                "is_unknown": bool(r.is_unknown),
                 "created_at": r.created_at,
                 "updated_at": r.updated_at,
             }

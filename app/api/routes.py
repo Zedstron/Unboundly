@@ -375,6 +375,7 @@ async def save_contact_endpoint(pid: str, contact_id: str = None, payload: dict 
     name = payload.get("name", "Unknown")
     trust = float(payload.get("trust", 0.0))
     source = payload.get("source")
+    is_unknown = payload.get("is_unknown")
 
     try:
         saved = await save_or_update_contact(
@@ -383,6 +384,7 @@ async def save_contact_endpoint(pid: str, contact_id: str = None, payload: dict 
             name=name,
             trust=trust,
             source=source,
+            is_unknown=is_unknown,
         )
         return saved
     except Exception as exc:
@@ -396,6 +398,7 @@ async def update_contact_trust_endpoint(pid: str, contact_id: str, payload: dict
     delta = float(payload.get("delta", 0.0))
     name = payload.get("name")
     source = payload.get("source")
+    is_unknown = payload.get("is_unknown")
 
     try:
         updated = await update_contact_trust(
@@ -404,6 +407,7 @@ async def update_contact_trust_endpoint(pid: str, contact_id: str, payload: dict
             delta=delta,
             name=name,
             source=source,
+            is_unknown=is_unknown,
         )
         return updated
     except Exception as exc:

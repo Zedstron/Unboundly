@@ -21,9 +21,9 @@ def print_table(contacts: list[dict]):
         print("\n[!] No contacts found in database.\n")
         return
 
-    print("\n" + "=" * 90)
-    print(f"{'ID':<6} {'Persona':<12} {'Contact ID':<25} {'Name':<20} {'Trust':<10} {'Source':<10}")
-    print("-" * 90)
+    print("\n" + "=" * 101)
+    print(f"{'ID':<6} {'Persona':<12} {'Contact ID':<25} {'Name':<20} {'Trust':<10} {'Source':<10} {'Status':<8}")
+    print("-" * 101)
     for c in contacts:
         cid = str(c.get("id", ""))
         pid = str(c.get("persona_id", ""))
@@ -31,8 +31,9 @@ def print_table(contacts: list[dict]):
         name = str(c.get("name", "Unknown"))
         trust = f"{float(c.get('trust', 0.0)):+.3f}"
         source = str(c.get("source") or "local")
-        print(f"{cid:<6} {pid:<12} {contact_id:<25} {name:<20} {trust:<10} {source:<10}")
-    print("=" * 90 + "\n")
+        status = "unknown" if c.get("is_unknown") else "known"
+        print(f"{cid:<6} {pid:<12} {contact_id:<25} {name:<20} {trust:<10} {source:<10} {status:<8}")
+    print("=" * 101 + "\n")
 
 
 async def select_persona() -> str:
@@ -65,6 +66,7 @@ async def main():
         print(" [2] Update Contact Trust (Delta / Direct)")
         print(" [3] Remove Contact")
         print(" [4] Refresh List")
+        print(" [5] Edit Contact (Name / Unknown Status)")
         print(" [q] Quit")
 
         choice = input("\nEnter option: ").strip().lower()
@@ -87,6 +89,8 @@ async def main():
                 print("Invalid trust value; defaulting to 0.0")
                 trust = 0.0
             source = input("Enter source platform (e.g. local, whatsapp, instagram) [local]: ").strip() or "local"
+            status_input = input("Mark as unknown contact? (y/N): ").strip().lower()
+            is_unknown = status_input in ("y", "yes")
 
             saved = await save_or_update_contact(
                 persona_id=persona_id,
@@ -94,6 +98,7 @@ async def main():
                 name=name,
                 trust=trust,
                 source=source,
+                is_unknown=is_unknown,
             )
             print(f"\n[+] Saved contact successfully: {saved}\n")
 
@@ -155,6 +160,42 @@ async def main():
 
         elif choice == "4":
             continue
+
+        elif choice == "5":
+            persona_id = await select_persona()
+            contact_id = input("Enter contact ID to edit: ").strip()
+            if not contact_id:
+                print("Contact ID cannot be empty.")
+                continue
+
+            existing = await get_contact(persona_id, contact_id)
+            if existing is None:
+                print(f"\n[!] Contact '{contact_id}' not found.\n")
+                continue
+
+            current_status = "unknown" if existing.get("is_unknown") else "known"
+            print(f"Current contact: Name={existing['name']}, Trust={existing['trust']:+.3f}, Status={current_status}")
+
+            new_name = input(f"Enter new name [{existing['name']}]: ").strip() or existing["name"]
+            status_input = input(
+                f"Is this contact unknown? [y/N] (current: {current_status}): "
+            ).strip().lower()
+            if status_input in ("y", "yes"):
+                is_unknown = True
+            elif status_input in ("n", "no"):
+                is_unknown = False
+            else:
+                is_unknown = bool(existing.get("is_unknown"))
+
+            updated = await save_or_update_contact(
+                persona_id=persona_id,
+                contact_id=contact_id,
+                name=new_name,
+                trust=existing["trust"],
+                source=existing.get("source"),
+                is_unknown=is_unknown,
+            )
+            print(f"\n[+] Updated contact: {updated}\n")
 
         else:
             print("Invalid option. Please try again.")
