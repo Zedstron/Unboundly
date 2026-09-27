@@ -312,6 +312,50 @@ async def clear_conversation(persona_id: str, conversation_id: str) -> int:
         await session.commit()
         return result.rowcount
 
+
+async def clear_persona_messages(persona_id: str, conversation_id: str | None = None) -> int:
+    async with SessionFactory() as session:
+        query = delete(ConversationMessage).where(ConversationMessage.persona_id == persona_id)
+        if conversation_id is not None:
+            query = query.where(ConversationMessage.conversation_id == conversation_id)
+        result = await session.execute(query)
+        await session.commit()
+        return result.rowcount
+
+
+async def get_persona_conversations(persona_id: str) -> list[dict[str, Any]]:
+    async with SessionFactory() as session:
+        result = await session.execute(
+            select(
+                ConversationMessage.conversation_id,
+                func.count(ConversationMessage.id).label("message_count"),
+                func.max(ConversationMessage.created_at).label("last_message_at"),
+            )
+            .where(ConversationMessage.persona_id == persona_id)
+            .group_by(ConversationMessage.conversation_id)
+            .order_by(func.max(ConversationMessage.created_at).desc(), ConversationMessage.conversation_id.asc())
+        )
+        conversations: list[dict[str, Any]] = []
+        for row in result.all():
+            last_message = await session.execute(
+                select(ConversationMessage.content)
+                .where(
+                    ConversationMessage.persona_id == persona_id,
+                    ConversationMessage.conversation_id == row.conversation_id,
+                )
+                .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+                .limit(1)
+            )
+            content = last_message.scalars().first()
+            conversations.append({
+                "conversation_id": row.conversation_id,
+                "message_count": int(row.message_count),
+                "last_message": content,
+                "last_message_at": row.last_message_at,
+            })
+        return conversations
+
+
 async def get_last_message(persona_id: str, conversation_id: str) -> dict:
     async with SessionFactory() as session:
         result = await session.execute(
