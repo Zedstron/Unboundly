@@ -6,6 +6,8 @@ from app.agents.state import PersonaGraphState
 
 
 async def generate_response_node(state: PersonaGraphState, ai: AIProvider) -> dict[str, AgentResponse]:
+    """Message agent: given the compiled prompt (persona, mood, contact, memories),
+    generate only the reply text to send."""
     messages = state["messages"]
 
     if mcp_registry.has_tools:

@@ -12,7 +12,7 @@ The **Persona Simulation Engine** simulates human texting behavior for realistic
 - **Affective State & Biological Cycle**: Mood dynamics across 6 dimensions (`valence`, `arousal`, `irritability`, `affection`, `curiosity`, `fear`) modulated by menstrual phase offsets and hourly decay to baseline.
 - **Behavior Engine**: Evaluates circadian availability curves, busyness, and idle time to output one of three decisions: `no_reply`, `reply_scheduled` (late reply), or `reply_now`.
 - **Contact & Trust System**: Persistent contact directory in SQLite. Every contact has a hidden `trust` score $\in [-1.0, 1.0]$. Unknown numbers default to $0.0$ trust and can be configured to be ignored via `.env`.
-- **LangGraph Agent Workflow**: Orchestrates event classification, memory fetch, system prompt compilation with contact relationship context, tool-use loop, structured response extraction (`response`, `trust_factor`, `memories`), and memory/trust persistence.
+- **LangGraph Agent Workflow**: Orchestrates event classification, memory fetch, system prompt compilation with contact relationship context, and a parallel two-agent fan-out: a message agent (plain-text reply generation with tool-use loop) and a memory agent (structured memory/trust decision), joined by memory/trust persistence.
 - **Background Worker & Scheduler**: Periodically triggers presence life ticks (`life_tick`), schedules delayed replies via Redis sorted sets, and executes proactive follow-ups.
 - **Transport Routing**: Clean decoupling between bridge channels (WhatsApp/Instagram) and Web UI real-time pub/sub.
 
@@ -135,8 +135,9 @@ persona/
 3. **Reply Execution via LangGraph**:
    - `retrieve_context_node`: Fetches 15 recent messages, short-term memories, semantic long-term memories, and contact/trust information.
    - `build_prompt_node`: Compiles persona traits, mood state, contact status (unknown vs known and current trust), and memory context into system prompt.
-   - `generate_response_node`: Generates response via OpenAI-compatible endpoint with tool-use loop support.
-   - `save_memories_node`: Stores extracted facts and applies the returned `trust_factor` delta to update the contact's trust score in SQLite.
+   - `generate_response_node`: Message agent — generates only the reply text via OpenAI-compatible endpoint with tool-use loop support.
+   - `decide_memories_node`: Memory agent — runs in parallel with the message agent over the latest exchange and recalled memories; decides which facts to store and the `trust_factor` delta via a structured JSON schema call (temperature 0). Degrades to a no-op on LLM failure.
+   - `save_memories_node`: Stores the memory agent's extracted facts and applies its `trust_factor` delta to update the contact's trust score in SQLite.
    - `postprocess_response_node`: Strips and validates reply text.
 4. **Outbound Routing**:
    - If message source is `whatsapp` or `instagram`, reply and seen events are sent strictly to the bridge interface.

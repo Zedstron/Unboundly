@@ -12,6 +12,7 @@ from app.infrastructure.memory import LongTermMemory, ShortTermMemory
 from .nodes import (
     build_prompt_node,
     classify_event_node,
+    decide_memories_node,
     generate_response_node,
     postprocess_response_node,
     retrieve_context_node,
@@ -109,6 +110,10 @@ class PersonaAgentGraph:
             partial(generate_response_node, ai=self.ai),
         )
         builder.add_node(
+            "decide_memories",
+            partial(decide_memories_node, ai=self.ai),
+        )
+        builder.add_node(
             "save_memories",
             partial(
                 save_memories_node,
@@ -129,7 +134,15 @@ class PersonaAgentGraph:
 
         builder.add_edge("retrieve_context", "build_prompt")
         builder.add_edge("build_prompt", "generate_response")
-        builder.add_edge("generate_response", "save_memories")
+
+        # Fan out: message agent and memory agent run in parallel off the same
+        # compiled prompt, then the persistence node joins their results.
+        builder.add_conditional_edges(
+            "generate_response",
+            lambda _state: ["decide_memories", "postprocess_response"],
+            ["decide_memories", "postprocess_response"],
+        )
+        builder.add_edge("decide_memories", "save_memories")
         builder.add_edge("save_memories", "postprocess_response")
         builder.add_edge("postprocess_response", END)
 

@@ -53,21 +53,24 @@ class Memory(BaseModel):
     )
 
 class MemoryDecision(BaseModel):
+    """Memory agent output: what to store from this interaction and the trust delta."""
+
     memories: list[Memory] = Field(
         default_factory=list,
         description="Memories extracted from the current interaction."
     )
-
-
-class AgentResponse(BaseModel):
-    response: str = Field(..., min_length=1)
     trust_factor: float = Field(
         default=0.0,
         ge=-1.0,
         le=1.0,
         description="Trust delta from this interaction between -1.0 and 1.0 (0 means unchanged, positive increases trust, negative decreases trust)."
     )
-    memories: list[Memory] = Field(default_factory=list)
+
+
+class AgentResponse(BaseModel):
+    """Message agent output: only the reply text to send."""
+
+    response: str = Field(..., min_length=1)
 
 
 class ContactInfo(BaseModel):

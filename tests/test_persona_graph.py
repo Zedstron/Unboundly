@@ -1,7 +1,7 @@
 import asyncio
 
 from app.agents.persona_graph import PersonaAgentGraph
-from app.domain.models import AgentResponse
+from app.domain.models import AgentResponse, MemoryDecision
 
 
 class FakeAI:
@@ -11,7 +11,14 @@ class FakeAI:
     async def chat(self, messages, *, temperature):
         assert messages[0]["role"] == "system"
         assert temperature == 0.85
-        return AgentResponse(response="that is sweet", memories=[])
+        return AgentResponse(response="that is sweet")
+
+    async def decide_memories(self, messages, *, temperature):
+        assert temperature == 0.0
+        return MemoryDecision(
+            memories=[],
+            trust_factor=0.02,
+        )
 
 
 class FakeShortMemory:
@@ -39,7 +46,6 @@ async def _run_graph(monkeypatch):
     agent.long_memory = FakeLongMemory()
     agent.rebuild_graph()
 
-
     async def fake_history(_persona_id, _conversation_id, limit):
         assert limit == 15
         return [{"direction": "user", "content": "you are cute"}]
@@ -52,7 +58,6 @@ async def _run_graph(monkeypatch):
 
     event = await agent.classify_event("you are cute", ["compliment", "conflict"])
     reply = await agent.generate_reply("conversation", {"valence": 0.4})
-
 
     assert event == "compliment"
     assert reply == "that is sweet"

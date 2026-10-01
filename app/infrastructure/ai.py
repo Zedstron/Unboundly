@@ -11,7 +11,7 @@ except ImportError:
 
 from app.core.logger import get_logger
 from app.core.prompts import get_prompt
-from app.domain.models import AgentResponse
+from app.domain.models import AgentResponse, MemoryDecision
 
 logger = get_logger(__name__)
 
@@ -79,9 +79,34 @@ class AIProvider:
 
 
     async def chat(self, messages: Sequence[dict[str, str]], *, temperature: float = 0.8) -> AgentResponse:
+        """Message agent call: returns only the reply text (no JSON envelope)."""
         logger.debug(f"[OpenAICompatibleAI.chat] Chat API call started: num_messages={len(messages)}, temperature={temperature}, model={self.model}")
         try:
-            schema = AgentResponse.model_json_schema()
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=list(messages),
+                temperature=temperature,
+            )
+
+            content = (response.choices[0].message.content or "").strip()
+            result = AgentResponse(response=content)
+            logger.debug("Plain-text response received from model, returning")
+
+            return result
+        except Exception as e:
+            logger.error(f"[OpenAICompatibleAI.chat] Error calling chat API: {e}", exc_info=True)
+            raise
+
+    async def decide_memories(
+        self,
+        messages: Sequence[dict[str, str]],
+        *,
+        temperature: float = 0.0,
+    ) -> MemoryDecision:
+        """Memory agent call: returns memories to store plus the trust delta."""
+        logger.debug(f"[OpenAICompatibleAI.decide_memories] Memory decision call started: num_messages={len(messages)}, model={self.model}")
+        try:
+            schema = MemoryDecision.model_json_schema()
             schema["additionalProperties"] = False
 
             for definition in schema.get("$defs", {}).values():
@@ -95,7 +120,7 @@ class AIProvider:
                     response_format={
                         "type": "json_schema",
                         "json_schema": {
-                            "name": "persona_response",
+                            "name": "persona_memory_decision",
                             "strict": True,
                             "schema": schema,
                         },
@@ -111,12 +136,16 @@ class AIProvider:
                 )
 
             content = response.choices[0].message.content or "{}"
-            result = AgentResponse.model_validate(json.loads(content))
-            logger.debug("Structured response received from model, returning")
+            result = MemoryDecision.model_validate(json.loads(content))
+            logger.debug(
+                "Memory decision received: %d memor(y/ies), trust_factor=%.3f",
+                len(result.memories),
+                result.trust_factor,
+            )
 
             return result
         except Exception as e:
-            logger.error(f"[OpenAICompatibleAI.chat] Error calling chat API: {e}", exc_info=True)
+            logger.error(f"[OpenAICompatibleAI.decide_memories] Error calling chat API: {e}", exc_info=True)
             raise
 
 
@@ -155,7 +184,7 @@ class AIProvider:
                 try:
                     return AgentResponse.model_validate(json.loads(content))
                 except Exception:
-                    return AgentResponse(response=content, memories=[])
+                    return AgentResponse(response=content)
 
             conversation.append({
                 "role": "assistant",
@@ -220,7 +249,7 @@ class AIProvider:
         try:
             return AgentResponse.model_validate(json.loads(last_content))
         except Exception:
-            return AgentResponse(response=last_content or "(no reply)", memories=[])
+            return AgentResponse(response=last_content or "(no reply)")
 
 
     async def classify_event(self, text: str, allowed_events: Sequence[str]) -> str:

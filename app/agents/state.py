@@ -1,5 +1,5 @@
 from typing import Any, Literal, TypedDict
-from app.domain.models import AgentResponse
+from app.domain.models import AgentResponse, MemoryDecision
 
 
 class PersonaGraphState(TypedDict, total=False):
@@ -19,6 +19,7 @@ class PersonaGraphState(TypedDict, total=False):
     long_memories: list[dict[str, Any]]
     messages: list[dict[str, str]]
     agent_response: AgentResponse
+    memory_decision: MemoryDecision
     reply: str
     trust_factor: float
 
