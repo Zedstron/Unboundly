@@ -1,6 +1,7 @@
 from typing import Any
 from app.core.prompts import get_prompt
 from app.agents.state import PersonaGraphState
+from app.domain.relationship import describe_relationship
 from app.infrastructure.mcp import registry as mcp_registry
 
 
@@ -18,13 +19,26 @@ def build_prompt_node(state: PersonaGraphState, persona: dict[str, Any]) -> dict
 
     contact = state.get("contact")
     sender_name = state.get("sender_name")
+    persona_gender = (persona.get("profile", {}) or {}).get("gender")
+
     if contact is None:
         name_str = f" ({sender_name})" if sender_name and sender_name != "Unknown" else ""
-        contact_context = f"Unknown contact / first message{name_str}. Internal Trust: 0.00 (Default: Unknown). You do not know this person yet."
+        contact_context = (
+            f"Unknown contact / first message{name_str}. "
+            + describe_relationship(
+                0.0,
+                sender_name,
+                persona_gender=persona_gender,
+                is_unknown=True,
+            )
+        )
     else:
-        name_str = contact.get("name", "Unknown")
-        trust_val = float(contact.get("trust", 0.0))
-        contact_context = f"Saved contact: {name_str}. Internal Trust: {trust_val:+.3f} (Scale: -1.0 to 1.0)."
+        contact_context = describe_relationship(
+            float(contact.get("trust", 0.0)),
+            contact.get("name"),
+            persona_gender=persona_gender,
+            is_unknown=bool(contact.get("is_unknown")),
+        )
 
     system = get_prompt(
         "persona",
@@ -54,4 +68,3 @@ def build_prompt_node(state: PersonaGraphState, persona: dict[str, Any]) -> dict
         for message in state["history"]
     ]
     return { "messages": [{"role": "system", "content": system }, *history ]}
-

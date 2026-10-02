@@ -20,19 +20,20 @@ def print_table(contacts: list[dict]):
         print("\n[!] No contacts found in database.\n")
         return
 
-    print("\n" + "=" * 101)
-    print(f"{'ID':<6} {'Persona':<12} {'Contact ID':<25} {'Name':<20} {'Trust':<10} {'Source':<10} {'Status':<8}")
-    print("-" * 101)
+    print("\n" + "=" * 130)
+    print(f"{'ID':<6} {'Persona':<12} {'Contact ID':<25} {'Name':<20} {'Trust':<10} {'Relationship':<14} {'Source':<10} {'Status':<8}")
+    print("-" * 130)
     for c in contacts:
         cid = str(c.get("id", ""))
         pid = str(c.get("persona_id", ""))
         contact_id = str(c.get("contact_id", ""))
         name = str(c.get("name", "Unknown"))
         trust = f"{float(c.get('trust', 0.0)):+.3f}"
+        relationship = str(c.get("relationship") or "-").replace("_", " ")
         source = str(c.get("source") or "local")
         status = "unknown" if c.get("is_unknown") else "known"
-        print(f"{cid:<6} {pid:<12} {contact_id:<25} {name:<20} {trust:<10} {source:<10} {status:<8}")
-    print("=" * 101 + "\n")
+        print(f"{cid:<6} {pid:<12} {contact_id:<25} {name:<20} {trust:<10} {relationship:<14} {source:<10} {status:<8}")
+    print("=" * 130 + "\n")
 
 
 async def select_persona() -> str:
@@ -87,6 +88,11 @@ async def main():
             except ValueError:
                 print("Invalid trust value; defaulting to 0.0")
                 trust = 0.0
+            relationship = input(
+                "Relationship stage (blank = auto from trust) "
+                "[stranger/acquaintance/friend/close_friend/best_friend/crush/flirting/"
+                "in_love/boyfriend/girlfriend/partner/engaged/family/blocked]: "
+            ).strip() or None
             source = input("Enter source platform (e.g. local, whatsapp, instagram) [local]: ").strip() or "local"
             status_input = input("Mark as unknown contact? (y/N): ").strip().lower()
             is_unknown = status_input in ("y", "yes")
@@ -98,6 +104,7 @@ async def main():
                 trust=trust,
                 source=source,
                 is_unknown=is_unknown,
+                relationship=relationship,
             )
             print(f"\n[+] Saved contact successfully: {saved}\n")
 
@@ -114,7 +121,7 @@ async def main():
             else:
                 print(f"Contact does not exist yet. Will create new entry with default trust 0.0.")
 
-            mode = input("Update mode: [d]elta (e.g. +0.05 or -0.1) or [s]et absolute value? [d]: ").strip().lower()
+            mode = input("Update mode: [d]elta (e.g. +0.05 or -0.1), [s]et absolute trust, or [r]elationship stage? [d]: ").strip().lower()
             if mode == "s":
                 val_str = input("Enter new absolute trust (-1.0 to 1.0): ").strip()
                 try:
@@ -130,6 +137,20 @@ async def main():
                     print(f"\n[+] Updated contact trust: {updated}\n")
                 except ValueError:
                     print("Invalid trust number.")
+            elif mode == "r":
+                current = existing.get("relationship") if existing else None
+                stage = input(
+                    f"Enter relationship stage [{current or 'auto'}] "
+                    "(stranger/acquaintance/friend/close_friend/best_friend/crush/flirting/"
+                    "in_love/boyfriend/girlfriend/partner/engaged/family/blocked, blank = auto): "
+                ).strip() or None
+                updated = await update_contact_trust(
+                    persona_id=persona_id,
+                    contact_id=contact_id,
+                    delta=0.0,
+                    relationship=stage,
+                )
+                print(f"\n[+] Updated relationship: {updated}\n")
             else:
                 delta_str = input("Enter trust delta to add/subtract (e.g. 0.02 or -0.05): ").strip()
                 try:

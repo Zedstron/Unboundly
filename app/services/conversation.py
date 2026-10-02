@@ -168,6 +168,13 @@ class ConversationService:
             contact_id = message.sender_id or message.chat_id
             if await self._contact_is_unknown(message.chat_id, message.sender_id) and not settings.reply_unknown_contacts:
                 logger.info(f"[ConversationService.ingest] Unknown contact ({contact_id}) and reply_unknown_contacts is disabled. Skipping reply.")
+                # Still remember it: memory/trust processing is how a stranger
+                # can eventually become a known contact.
+                await self.short_memory.schedule(
+                    "memory_pending",
+                    self._memory_task_payload(message, message_id),
+                    time(),
+                )
                 return { "message_id": message_id }
 
             ctx = BehaviorContext(
@@ -183,6 +190,13 @@ class ConversationService:
 
             if decision is Decision.NO_REPLY:
                 logger.info(f"[ConversationService.ingest] Decision: NO_REPLY for conversation_id={message.chat_id}")
+                # The message is still worth remembering even if the persona
+                # chooses not to reply right now.
+                await self.short_memory.schedule(
+                    "memory_pending",
+                    self._memory_task_payload(message, message_id),
+                    time(),
+                )
                 return { "message_id": message_id }
 
             if decision is Decision.LATE_REPLY:
@@ -191,14 +205,7 @@ class ConversationService:
 
                 await self.short_memory.schedule(
                     "reply_pending",
-                    {
-                        "conversation_id": message.chat_id,
-                        "persona_id": self.persona["id"],
-                        "user_message_id": message_id,
-                        "source": message.provider,
-                        "sender_id": message.sender_id,
-                        "sender_name": message.sender_name,
-                    },
+                    self._reply_task_payload(message, message_id),
                     due,
                 )
                 logger.debug(f"[ConversationService.ingest] Scheduled reply_pending task: conversation_id={message.chat_id}")
@@ -208,14 +215,7 @@ class ConversationService:
             logger.info(f"[ConversationService.ingest] Decision: REPLY_NOW, scheduling immediate reply")
             await self.short_memory.schedule(
                 "reply_pending",
-                {
-                    "conversation_id": message.chat_id,
-                    "persona_id": self.persona["id"],
-                    "user_message_id": message_id,
-                    "source": message.provider,
-                    "sender_id": message.sender_id,
-                    "sender_name": message.sender_name,
-                },
+                self._reply_task_payload(message, message_id),
                 time(),
             )
             logger.debug(f"[ConversationService.ingest] Scheduled reply_pending task immediately: conversation_id={message.chat_id}")
@@ -224,6 +224,94 @@ class ConversationService:
         except Exception as e:
             logger.error(f"[ConversationService.ingest] Error during ingest: {e}", exc_info=True)
             raise
+
+    @staticmethod
+    def _reply_task_payload(message: SocialMessage, message_id: int) -> dict:
+        """Reply task routing info ONLY.
+
+        Deliberately excludes the message text: the reply generator must read
+        what the user said from conversation history. Embedding the text here
+        caused echoed replies — on a re-scheduled task the worker reused the
+        stale text (even the user's own words) as the outgoing reply.
+        """
+        return {
+            "conversation_id": message.chat_id,
+            "persona_id": message.session,
+            "user_message_id": message_id,
+            "source": message.provider,
+            "sender_id": message.sender_id,
+            "sender_name": message.sender_name,
+        }
+
+    @staticmethod
+    def _memory_task_payload(message: SocialMessage, message_id: int) -> dict:
+        return {
+            "conversation_id": message.chat_id,
+            "persona_id": message.session,
+            "user_message_id": message_id,
+            "source": message.provider,
+            "sender_id": message.sender_id,
+            "sender_name": message.sender_name,
+        }
+
+    @staticmethod
+    def _memory_task_payload_from_action(action: dict, persona_id: str) -> dict:
+        return {
+            "conversation_id": action["conversation_id"],
+            "persona_id": persona_id,
+            "user_message_id": action["message_id"],
+            "source": action.get("source"),
+            "sender_id": action.get("sender_id"),
+            "sender_name": action.get("sender_name"),
+        }
+
+    async def remember_message(
+        self,
+        conversation_id: str,
+        text: str | None = None,
+        sender_id: str | None = None,
+        sender_name: str | None = None,
+        user_message_id: int | None = None,
+        source: str | None = None,
+    ) -> None:
+        """Run only the memory agent over an inbound message.
+
+        Ensures every message gets a chance to be stored even when the persona
+        never replies (NO_REPLY, offline, unknown contact). The graph extracts
+        durable facts from history + this message and updates contact trust.
+        Deduplicated per message so ingest + unread-sweep scheduling cannot
+        process the same message twice.
+        """
+        flag_key = None
+        if user_message_id is not None:
+            flag_key = f"persona:memory:processed:{self.persona['id']}:{user_message_id}"
+            try:
+                if await self.short_memory.get_json(flag_key):
+                    logger.debug(
+                        "[ConversationService.remember_message] Message already memory-processed, skipping: message_id=%s",
+                        user_message_id,
+                    )
+                    return
+            except Exception:
+                flag_key = None
+
+        await self.agent.remember_message(
+            conversation_id=conversation_id,
+            text=text,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            source=source,
+        )
+
+        if flag_key is not None:
+            try:
+                await self.short_memory.set_json(
+                    flag_key,
+                    {"processed_at": datetime.now(timezone.utc).isoformat()},
+                    ttl=7 * 24 * 60 * 60,
+                )
+            except Exception:
+                pass
 
     async def generate_reply(
         self,
@@ -466,6 +554,18 @@ class ConversationService:
                 contact_id = message.get("sender_id") or message["conversation_id"]
                 if await self._contact_is_unknown(message["conversation_id"], message.get("sender_id")) and not settings.reply_unknown_contacts:
                     logger.info(f"[ConversationService.process_unread_messages] Unknown contact ({contact_id}) and reply_unknown_contacts is disabled. Skipping reply.")
+                    await self.short_memory.schedule(
+                        "memory_pending",
+                        {
+                            "conversation_id": message["conversation_id"],
+                            "persona_id": self.persona["id"],
+                            "user_message_id": message["id"],
+                            "source": message.get("source"),
+                            "sender_id": message.get("sender_id"),
+                            "sender_name": message.get("sender_name"),
+                        },
+                        time(),
+                    )
                     continue
 
                 event = await self._classify_event(message["content"])
@@ -512,7 +612,7 @@ class ConversationService:
                 if action["decision"] == Decision.LATE_REPLY.value:
                     delay = self._delay_seconds(state, action["content"])
                     logger.info(f"[ConversationService.process_unread_messages] Scheduling LATE_REPLY: conversation_id={action['conversation_id']}, delay_seconds={delay:.1f}")
-                    
+
                     await self.short_memory.schedule(
                         "reply_pending",
                         {
@@ -522,7 +622,6 @@ class ConversationService:
                             "source": action["source"],
                             "sender_id": action["sender_id"],
                             "sender_name": action["sender_name"],
-                            "text": action["content"],
                         },
                         time() + delay,
                     )
@@ -537,12 +636,16 @@ class ConversationService:
                             "source": action["source"],
                             "sender_id": action["sender_id"],
                             "sender_name": action["sender_name"],
-                            "text": action["content"],
                         },
                         time(),
                     )
                 else:
-                    logger.debug(f"[ConversationService.process_unread_messages] No action needed: decision={action['decision']}")
+                    logger.debug(f"[ConversationService.process_unread_messages] No reply needed: decision={action['decision']}; scheduling memory-only task")
+                    await self.short_memory.schedule(
+                        "memory_pending",
+                        self._memory_task_payload_from_action(action, self.persona["id"]),
+                        time(),
+                    )
 
 
             logger.info(f"[ConversationService.process_unread_messages] Processed {len(actions)} unread messages")

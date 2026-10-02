@@ -138,7 +138,17 @@ async def update_persona_state_endpoint(pid: str, payload: dict = Body(...)):
 async def send_message(pid: str, payload: MessageIn):
     logger.info(f"[send_message] Received message for persona_id={pid}, conversation_id={payload.conversation_id}, text_length={len(payload.text)}")
     try:
-        message = SocialMessage("local", pid, None, "message", payload.conversation_id, payload.sender_id, payload.sender_name, payload.text, None, None)
+        message = SocialMessage(
+            session=pid,
+            message_id="local",
+            message_type="message",
+            chat_id=payload.conversation_id,
+            item_id=payload.conversation_id,
+            sender_id=payload.sender_id,
+            sender_name=payload.sender_name,
+            text=payload.text,
+            provider="local",
+        )
         result = await service(pid).ingest(message)
 
         logger.debug(f"[send_message] Message ingested successfully: message_id={result.get('message_id')}")
@@ -376,6 +386,7 @@ async def save_contact_endpoint(pid: str, contact_id: str = None, payload: dict 
     trust = float(payload.get("trust", 0.0))
     source = payload.get("source")
     is_unknown = payload.get("is_unknown")
+    relationship = payload.get("relationship")
 
     try:
         saved = await save_or_update_contact(
@@ -385,6 +396,7 @@ async def save_contact_endpoint(pid: str, contact_id: str = None, payload: dict 
             trust=trust,
             source=source,
             is_unknown=is_unknown,
+            relationship=relationship,
         )
         return saved
     except Exception as exc:
@@ -399,6 +411,7 @@ async def update_contact_trust_endpoint(pid: str, contact_id: str, payload: dict
     name = payload.get("name")
     source = payload.get("source")
     is_unknown = payload.get("is_unknown")
+    relationship = payload.get("relationship")
 
     try:
         updated = await update_contact_trust(
@@ -408,6 +421,7 @@ async def update_contact_trust_endpoint(pid: str, contact_id: str, payload: dict
             name=name,
             source=source,
             is_unknown=is_unknown,
+            relationship=relationship,
         )
         return updated
     except Exception as exc:

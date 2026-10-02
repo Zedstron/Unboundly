@@ -3,7 +3,7 @@ from app.domain.models import AgentResponse, MemoryDecision
 
 
 class PersonaGraphState(TypedDict, total=False):
-    operation: Literal["classify", "reply"]
+    operation: Literal["classify", "reply", "remember"]
     conversation_id: str
     sender_id: str | None
     sender_name: str | None

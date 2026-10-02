@@ -79,6 +79,7 @@ class ContactInfo(BaseModel):
     contact_id: str
     name: str = "Unknown"
     trust: float = 0.0
+    relationship: str = "stranger"
     source: str | None = None
     is_unknown: bool = False
     created_at: datetime | None = None

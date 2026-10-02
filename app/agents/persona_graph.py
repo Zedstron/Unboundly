@@ -15,6 +15,7 @@ from .nodes import (
     decide_memories_node,
     generate_response_node,
     postprocess_response_node,
+    remember_message_node,
     retrieve_context_node,
     save_memories_node,
 )
@@ -81,6 +82,28 @@ class PersonaAgentGraph:
         )
         return result["reply"]
 
+    async def remember_message(
+        self,
+        conversation_id: str,
+        text: str | None = None,
+        sender_id: str | None = None,
+        sender_name: str | None = None,
+        source: str | None = None,
+    ) -> None:
+        """Run the memory agent only: store memories and adjust trust without
+        generating or sending any reply."""
+        await self.graph.ainvoke(
+            {
+                "operation": "remember",
+                "conversation_id": conversation_id,
+                "mood": {},
+                "text": text,
+                "sender_id": sender_id,
+                "sender_name": sender_name,
+                "source": source,
+            }
+        )
+
 
 
     def _build_graph(self):
@@ -91,6 +114,16 @@ class PersonaAgentGraph:
         builder.add_node(
             "classify_event",
             partial(classify_event_node, ai=self.ai),
+        )
+        builder.add_node(
+            "remember_message",
+            partial(
+                remember_message_node,
+                persona_id=persona_id,
+                short_memory=self.short_memory,
+                long_memory=self.long_memory,
+                ai=self.ai,
+            ),
         )
         builder.add_node(
             "retrieve_context",
@@ -127,10 +160,11 @@ class PersonaAgentGraph:
         builder.add_conditional_edges(
             START,
             _route_entry,
-            { "classify": "classify_event", "reply": "retrieve_context" }
+            { "classify": "classify_event", "reply": "retrieve_context", "remember": "remember_message" }
         )
 
         builder.add_edge("classify_event", END)
+        builder.add_edge("remember_message", END)
 
         builder.add_edge("retrieve_context", "build_prompt")
         builder.add_edge("build_prompt", "generate_response")
@@ -149,5 +183,5 @@ class PersonaAgentGraph:
         return builder.compile()
 
 
-def _route_entry(state: PersonaGraphState) -> Literal["classify", "reply"]:
+def _route_entry(state: PersonaGraphState) -> Literal["classify", "reply", "remember"]:
     return state["operation"]

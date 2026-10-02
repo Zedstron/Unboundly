@@ -55,6 +55,15 @@ async def init_db() -> None:
                 "UPDATE contacts SET is_unknown = 0 "
                 "WHERE name IS NOT NULL AND TRIM(name) <> '' AND LOWER(TRIM(name)) <> 'unknown'"
             ))
+        if "relationship" not in contact_columns:
+            # Existing contacts keep NULL; the relationship is recomputed from
+            # trust on read until the next explicit save rewrites it.
+            await connection.execute(text("ALTER TABLE contacts ADD COLUMN relationship VARCHAR(30)"))
+
+    # Backfill the stored relationship stage for legacy rows so the
+    # column is always populated on read. Runs through the async session
+    # because run_sync callbacks expect sync-style connection usage.
+    await _backfill_relationships()
 
 
 async def save_message(
@@ -490,22 +499,59 @@ async def get_contact(persona_id: str, contact_id: str) -> dict[str, Any] | None
         if row is None:
             return None
 
-        return {
-            "id": row.id,
-            "persona_id": row.persona_id,
-            "contact_id": row.contact_id,
-            "name": row.name,
-            "trust": float(row.trust),
-            "source": row.source,
-            "is_unknown": bool(row.is_unknown),
-            "created_at": row.created_at,
-            "updated_at": row.updated_at,
-        }
+        return await _contact_row_dict(row)
 
 
 def _default_is_unknown(name: str | None) -> bool:
     """A name that is missing or the placeholder means the contact is unvetted."""
     return not name or name.strip().lower() == "unknown"
+
+
+def _stage_for_trust_value(trust: float) -> str:
+    from app.domain.relationship import RelationshipStage, stage_for_trust
+
+    return stage_for_trust(trust).value
+
+
+async def _backfill_relationships() -> None:
+    """Backfill relationship stages for legacy contact rows missing one."""
+    from app.domain.relationship import stage_for_trust
+
+    async with SessionFactory() as session:
+        result = await session.execute(
+            select(Contact).where(Contact.relationship.is_(None))
+        )
+        rows = result.scalars().all()
+        for row in rows:
+            row.relationship = stage_for_trust(float(row.trust)).value
+        if rows:
+            await session.commit()
+
+
+async def _contact_row_dict(row: Contact) -> dict[str, Any]:
+    from app.domain.relationship import RelationshipStage, stage_for_trust, relationship_payload
+
+    stored = (row.relationship or "").strip()
+    stage_value = stored or stage_for_trust(float(row.trust)).value
+    try:
+        RelationshipStage(stage_value)
+    except ValueError:
+        stage_value = stage_for_trust(float(row.trust)).value
+
+    payload = relationship_payload(float(row.trust))
+    return {
+        "id": row.id,
+        "persona_id": row.persona_id,
+        "contact_id": row.contact_id,
+        "name": row.name,
+        "trust": float(row.trust),
+        "relationship": stage_value,
+        "source": row.source,
+        "is_unknown": bool(row.is_unknown),
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+        "relationship_payload": payload,
+    }
 
 
 async def save_or_update_contact(
@@ -515,15 +561,19 @@ async def save_or_update_contact(
     trust: float = 0.0,
     source: str | None = None,
     is_unknown: bool | None = None,
+    relationship: str | None = None,
 ) -> dict[str, Any]:
     """Explicitly create/update a contact.
 
     When ``is_unknown`` is omitted it is inferred for new contacts from the
     name (a real name marks the contact as known) and preserved for existing
-    contacts so an explicit save does not silently flip its status.
+    contacts so an explicit save does not silently flip its status. When
+    ``relationship`` is omitted the stage is derived from trust; passing a
+    valid stage name pins it (e.g. "family" or "blocked").
     """
     now = datetime.now(timezone.utc)
     clamped_trust = max(-1.0, min(1.0, float(trust)))
+    from app.domain.relationship import RelationshipStage
 
     async with SessionFactory() as session:
         result = await session.execute(
@@ -539,6 +589,7 @@ async def save_or_update_contact(
                 contact_id=contact_id,
                 name=name,
                 trust=clamped_trust,
+                relationship=relationship or _stage_for_trust_value(clamped_trust),
                 source=source,
                 is_unknown=_default_is_unknown(name) if is_unknown is None else bool(is_unknown),
                 created_at=now,
@@ -549,6 +600,14 @@ async def save_or_update_contact(
             if name and name != "Unknown":
                 row.name = name
             row.trust = clamped_trust
+            if relationship:
+                # Preserve an explicit value even if it disagrees with trust:
+                # admins can pin e.g. "family" or "blocked" manually.
+                try:
+                    RelationshipStage(relationship)
+                    row.relationship = relationship
+                except ValueError:
+                    pass
             if source:
                 row.source = source
             if is_unknown is not None:
@@ -557,17 +616,7 @@ async def save_or_update_contact(
 
         await session.commit()
         await session.refresh(row)
-        return {
-            "id": row.id,
-            "persona_id": row.persona_id,
-            "contact_id": row.contact_id,
-            "name": row.name,
-            "trust": float(row.trust),
-            "source": row.source,
-            "is_unknown": bool(row.is_unknown),
-            "created_at": row.created_at,
-            "updated_at": row.updated_at,
-        }
+        return await _contact_row_dict(row)
 
 
 async def update_contact_trust(
@@ -577,6 +626,7 @@ async def update_contact_trust(
     name: str | None = None,
     source: str | None = None,
     is_unknown: bool | None = None,
+    relationship: str | None = None,
 ) -> dict[str, Any]:
     """Adjust a contact's trust after an interaction.
 
@@ -586,51 +636,60 @@ async def update_contact_trust(
     reply from silently un-vetting a contact.
     """
     now = datetime.now(timezone.utc)
-    async with SessionFactory() as session:
-        result = await session.execute(
-            select(Contact).where(
-                Contact.persona_id == persona_id,
-                Contact.contact_id == contact_id,
-            ).limit(1)
-        )
-        row = result.scalars().first()
-        if row is None:
-            new_trust = max(-1.0, min(1.0, float(delta)))
-            row = Contact(
-                persona_id=persona_id,
-                contact_id=contact_id,
-                name=name or "Unknown",
-                trust=new_trust,
-                source=source,
-                is_unknown=True if is_unknown is None else bool(is_unknown),
-                created_at=now,
-                updated_at=now,
+    async def _update() -> dict[str, Any]:
+        now = datetime.now(timezone.utc)
+        async with SessionFactory() as session:
+            result = await session.execute(
+                select(Contact).where(
+                    Contact.persona_id == persona_id,
+                    Contact.contact_id == contact_id,
+                ).limit(1)
             )
-            session.add(row)
-        else:
-            new_trust = max(-1.0, min(1.0, float(row.trust) + float(delta)))
-            row.trust = new_trust
-            if name and name != "Unknown":
-                row.name = name
-            if source:
-                row.source = source
-            if is_unknown is not None:
-                row.is_unknown = bool(is_unknown)
-            row.updated_at = now
+            row = result.scalars().first()
+            if row is None:
+                new_trust = max(-1.0, min(1.0, float(delta)))
+                row = Contact(
+                    persona_id=persona_id,
+                    contact_id=contact_id,
+                    name=name or "Unknown",
+                    trust=new_trust,
+                    relationship=_stage_for_trust_value(new_trust),
+                    source=source,
+                    is_unknown=True if is_unknown is None else bool(is_unknown),
+                    created_at=now,
+                    updated_at=now,
+                )
+                session.add(row)
+            else:
+                new_trust = max(-1.0, min(1.0, float(row.trust) + float(delta)))
+                row.trust = new_trust
+                # Trust drives the stage unless the stage was pinned manually
+                # (or the caller explicitly pinned one just now).
+                if (row.relationship or "") not in _PINNED_STAGES:
+                    row.relationship = _stage_for_trust_value(new_trust)
+                if relationship:
+                    try:
+                        RelationshipStage(relationship)
+                        row.relationship = relationship
+                    except ValueError:
+                        pass
+                if name and name != "Unknown":
+                    row.name = name
+                if source:
+                    row.source = source
+                if is_unknown is not None:
+                    row.is_unknown = bool(is_unknown)
+                row.updated_at = now
 
-        await session.commit()
-        await session.refresh(row)
-        return {
-            "id": row.id,
-            "persona_id": row.persona_id,
-            "contact_id": row.contact_id,
-            "name": row.name,
-            "trust": float(row.trust),
-            "source": row.source,
-            "is_unknown": bool(row.is_unknown),
-            "created_at": row.created_at,
-            "updated_at": row.updated_at,
-        }
+            await session.commit()
+            await session.refresh(row)
+            return await _contact_row_dict(row)
+
+    from app.domain.relationship import RelationshipStage
+
+    _PINNED_STAGES = {RelationshipStage.FAMILY.value, RelationshipStage.BLOCKED.value}
+
+    return await _update()
 
 
 async def list_contacts(persona_id: str | None = None) -> list[dict[str, Any]]:
@@ -641,20 +700,7 @@ async def list_contacts(persona_id: str | None = None) -> list[dict[str, Any]]:
         query = query.order_by(Contact.name.asc(), Contact.id.asc())
         result = await session.execute(query)
         rows = result.scalars().all()
-        return [
-            {
-                "id": r.id,
-                "persona_id": r.persona_id,
-                "contact_id": r.contact_id,
-                "name": r.name,
-                "trust": float(r.trust),
-                "source": r.source,
-                "is_unknown": bool(r.is_unknown),
-                "created_at": r.created_at,
-                "updated_at": r.updated_at,
-            }
-            for r in rows
-        ]
+        return [await _contact_row_dict(r) for r in rows]
 
 
 async def delete_contact(persona_id: str, contact_id: str) -> bool:

@@ -144,6 +144,19 @@ async def worker_task(redis: Redis) -> None:
                         conversation_id = payload["conversation_id"]
                         source = payload.get("source")
 
+                        if "memory" in item_key:
+                            # Memory-only task: store what the user said without replying.
+                            logger.debug(f"[worker_task/memory] Storing memories for conversation_id={conversation_id}, persona_id={persona_id}")
+                            await conversation_service.remember_message(
+                                conversation_id,
+                                text=payload.get("text"),
+                                sender_id=payload.get("sender_id"),
+                                sender_name=payload.get("sender_name"),
+                                user_message_id=payload.get("user_message_id"),
+                                source=source,
+                            )
+                            continue
+
                         if "reply" in item_key:
                             user_mid = payload.get("user_message_id")
                             logger.debug(f"[worker_task/reply] Marking conversation messages as seen: conversation_id={conversation_id}, user_message_id={user_mid}")
@@ -156,24 +169,25 @@ async def worker_task(redis: Redis) -> None:
                             except Exception:
                                 logger.exception("Failed to mark conversation seen: conversation_id=%s", conversation_id)
 
-                        if "text" not in payload:
-                            logger.debug(f"[worker_task/reply] Generating reply for conversation_id={conversation_id}, persona_id={persona_id}")
-                            try:
-                                start_time = time.time()
-                                payload["text"] = await conversation_service.generate_reply(
-                                    conversation_id,
-                                    initiative=payload.get("trigger"),
-                                    source=source,
-                                    sender_id=payload.get("sender_id"),
-                                    sender_name=payload.get("sender_name"),
-                                )
-                                elapsed = time.time() - start_time
-                                logger.info(f"[worker_task/reply] Reply generated successfully in {elapsed:.2f}s: conversation_id={conversation_id}, text_length={len(payload['text'])}")
-                            except Exception as e:
-                                logger.error(f"[worker_task/reply] Error generating reply for conversation_id={conversation_id}: {e}", exc_info=True)
-                                payload["text"] = "hmmm"
-                        else:
-                            logger.debug(f"[worker_task/reply] Text already in payload, skipping generation")
+                        # Always generate fresh. A pre-set text on a replayed
+                        # task is what caused echoed replies (the user's own
+                        # words being sent back as the persona's message).
+                        try:
+                            start_time = time.time()
+                            payload["text"] = await conversation_service.generate_reply(
+                                conversation_id,
+                                initiative=payload.get("trigger"),
+                                source=source,
+                                sender_id=payload.get("sender_id"),
+                                sender_name=payload.get("sender_name"),
+                            )
+                            elapsed = time.time() - start_time
+                            logger.info(f"[worker_task/reply] Reply generated fresh: conversation_id={conversation_id}, text_length={len(payload['text'])}")
+                        except Exception as e:
+                            logger.error(f"[worker_task/reply] Error generating reply for conversation_id={conversation_id}: {e}", exc_info=True)
+                            # Never send a canned fallback: if generation fails,
+                            # abort the task instead of risking an echo.
+                            continue
 
                         logger.debug(f"[worker_task/reply] Saving bot message: persona_id={persona_id}, conversation_id={conversation_id}, text_length={len(payload['text'])}")
                         bot_message_id = await save_message(payload['persona_id'], conversation_id, 'bot', payload["text"], 'seen', source=source)

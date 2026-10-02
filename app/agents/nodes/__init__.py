@@ -4,6 +4,7 @@ from .memory_fetch import retrieve_context_node
 from .memory_update import decide_memories_node, save_memories_node
 from .postprocessing import postprocess_response_node
 from .preprocessing import build_prompt_node
+from .remember import remember_message_node
 
 __all__ = [
     "classify_event_node",
@@ -14,4 +15,5 @@ __all__ = [
     "decide_memories_node",
     "save_memories_node",
     "postprocess_response_node",
+    "remember_message_node",
 ]

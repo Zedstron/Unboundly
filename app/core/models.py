@@ -49,6 +49,7 @@ class Contact(Base):
     contact_id: Mapped[str] = mapped_column(String(255), index=True, nullable=False)
     name: Mapped[str] = mapped_column(String(255), nullable=False, default="Unknown")
     trust: Mapped[float] = mapped_column(default=0.0, nullable=False)
+    relationship: Mapped[str | None] = mapped_column(String(30), nullable=True, default=None)
     source: Mapped[str | None] = mapped_column(String(30), nullable=True)
     is_unknown: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
