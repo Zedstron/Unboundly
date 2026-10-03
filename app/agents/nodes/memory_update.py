@@ -66,7 +66,7 @@ async def decide_memories_node(
             state.get("long_memories", []),
         ),
         "user_text": user_text,
-        "persona_reply": (state.get("agent_response").response if state.get("agent_response") else ""),
+        "persona_reply": (state.get("agent_response").text if state.get("agent_response") else ""),
     }) + override
 
     messages = [

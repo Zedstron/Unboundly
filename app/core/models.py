@@ -18,6 +18,8 @@ class ConversationMessage(Base):
     external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     sender_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     sender_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reply_to_message_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reply_to_text: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

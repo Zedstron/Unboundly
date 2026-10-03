@@ -5,6 +5,19 @@ from app.domain.relationship import describe_relationship
 from app.infrastructure.mcp import registry as mcp_registry
 
 
+def _reply_context(state: PersonaGraphState) -> str:
+    """Describe an inbound reply so the agent can quote it back when useful."""
+    reply_to_text = (state.get("reply_to_text") or "").strip()
+    if not reply_to_text:
+        return "(none — this is a new message, not a reply)"
+
+    return (
+        "The latest message is a reply to an earlier message. "
+        f'The quoted text was: "{reply_to_text}". '
+        "If you answer with a quoted reply, quote that message."
+    )
+
+
 def build_prompt_node(state: PersonaGraphState, persona: dict[str, Any]) -> dict[str, list[dict[str, str]]]:
     tools_block = ""
     if mcp_registry.has_tools:
@@ -48,6 +61,7 @@ def build_prompt_node(state: PersonaGraphState, persona: dict[str, Any]) -> dict
             "traits": persona.get("traits", {}),
             "mood": state["mood"],
             "contact_context": contact_context,
+            "reply_context": _reply_context(state),
             "short_memories": state["short_memories"],
             "long_memories": state["long_memories"],
             "language_style": persona.get("profile", {}).get("language_style", []),

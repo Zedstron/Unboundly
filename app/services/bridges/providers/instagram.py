@@ -383,9 +383,31 @@ class InstagramBridge(SocialBridge):
 
         raise ValueError(f"unknown operation: {operation}")
 
-    async def _send_message(self, *, to: str | int, text: str) -> Any:
+    async def _send_message(
+        self,
+        *,
+        to: str | int,
+        text: str,
+        quoted_message_id: str | int | None = None,
+    ) -> Any:
         client = self._require_client()
-        return await self._call(client.direct_send, text, thread_ids=[int(to)])
+
+        if not quoted_message_id:
+            return await self._call(client.direct_send, text, thread_ids=[int(to)])
+
+        # direct_send supports quoting via ``reply_to_message``; it only needs
+        # the target item id (and client context when available).
+        reply_to = await self._call(
+            client.direct_message,
+            int(to),
+            int(quoted_message_id),
+        )
+        return await self._call(
+            client.direct_send,
+            text,
+            thread_ids=[int(to)],
+            reply_to_message=reply_to,
+        )
 
     async def _mark_seen(self, *, chat_id: str | int, message_id: str | int | None = None) -> Any:
         realtime = await self._wait_for_realtime()
@@ -522,6 +544,14 @@ class InstagramBridge(SocialBridge):
         if not fullname:
             self._usernames[uname] = fullname = cl.user_info_by_username(uname).full_name
 
+        # Instagram exposes a quoted message under ``replied_to_message`` (raw
+        # realtime payload) or ``reply`` (extracted DirectMessage model).
+        reply = message.get("replied_to_message") or message.get("reply") or {}
+        if not isinstance(reply, dict):
+            reply = getattr(reply, "model_dump", lambda: {})()
+        quoted_text = reply.get("text")
+        quoted_id = reply.get("item_id") or reply.get("id")
+
         return SocialMessage(
             provider="instagram",
             session=self.session,
@@ -534,6 +564,8 @@ class InstagramBridge(SocialBridge):
             sender_name=fullname,
             text=message.get("text", None),
             timestamp=self._parse_timestamp(message.get("timestamp")),
+            reply_to_message_id=str(quoted_id) if quoted_id else None,
+            reply_to_text=str(quoted_text) if quoted_text else None,
             raw=message
         )
 

@@ -31,4 +31,13 @@ class SocialMessage:
     is_disappearing: bool = False
     timestamp: datetime | None = None
 
+    # Set when the inbound message quotes an earlier message, so the agent
+    # knows it is a reply and to which message it is anchored.
+    reply_to_message_id: str | None = None
+    reply_to_text: str | None = None
+
     raw: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def is_reply(self) -> bool:
+        return bool(self.reply_to_message_id or self.reply_to_text)

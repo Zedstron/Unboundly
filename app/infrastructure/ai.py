@@ -18,6 +18,31 @@ logger = get_logger(__name__)
 _MAX_TOOL_ITERATIONS = 17
 
 
+def parse_agent_response(content: str) -> AgentResponse:
+    """Parse the message agent's JSON envelope, tolerating plain-text replies.
+
+    The persona is asked for ``{"type": ..., "text": ..., "reaction": ...}``.
+    Models occasionally ignore the envelope and return bare text, so that is
+    treated as a normal text message rather than an error. A malformed or
+    unsupported type (e.g. voice/image) raises so the caller aborts instead of
+    sending something unintended.
+    """
+    content = (content or "").strip()
+    if not content:
+        raise ValueError("Persona model returned an empty response")
+
+    if content.startswith("{"):
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            payload = None
+
+        if isinstance(payload, dict):
+            return AgentResponse.model_validate(payload)
+
+    return AgentResponse(type="text", text=content)
+
+
 class AIProvider:
     def __init__(
         self,
@@ -89,8 +114,8 @@ class AIProvider:
             )
 
             content = (response.choices[0].message.content or "").strip()
-            result = AgentResponse(response=content)
-            logger.debug("Plain-text response received from model, returning")
+            result = parse_agent_response(content)
+            logger.debug("Message agent response parsed: type=%s", result.type)
 
             return result
         except Exception as e:
@@ -181,10 +206,7 @@ class AIProvider:
                 content = msg.content or ""
                 logger.debug("[AIProvider.chat_with_tools] Final reply after %d iteration(s): %.120s", iteration + 1, content)
 
-                try:
-                    return AgentResponse.model_validate(json.loads(content))
-                except Exception:
-                    return AgentResponse(response=content)
+                return parse_agent_response(content)
 
             conversation.append({
                 "role": "assistant",
@@ -246,10 +268,7 @@ class AIProvider:
 
         logger.warning("[AIProvider.chat_with_tools] Reached max tool iterations (%d)", _MAX_TOOL_ITERATIONS)
         last_content = conversation[-1].get("content") or ""
-        try:
-            return AgentResponse.model_validate(json.loads(last_content))
-        except Exception:
-            return AgentResponse(response=last_content or "(no reply)")
+        return parse_agent_response(last_content or "(no reply)")
 
 
     async def classify_event(self, text: str, allowed_events: Sequence[str]) -> str:

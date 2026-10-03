@@ -147,6 +147,8 @@ async def send_message(pid: str, payload: MessageIn):
             sender_id=payload.sender_id,
             sender_name=payload.sender_name,
             text=payload.text,
+            reply_to_message_id=payload.reply_to_message_id,
+            reply_to_text=payload.reply_to_text,
             provider="local",
         )
         result = await service(pid).ingest(message)

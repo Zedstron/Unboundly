@@ -217,12 +217,7 @@ class WhatsAppBridge(SocialBridge):
         kwargs = command.kwargs
 
         if operation == Operation.SEND_MESSAGE:
-            return await self._call(
-                self._client.sendText,
-                kwargs["to"],
-                kwargs["text"],
-                kwargs.get("options"),
-            )
+            return await self._send_message(**kwargs)
 
         if operation == Operation.MARK_SEEN:
             return await self._call(
@@ -243,6 +238,29 @@ class WhatsAppBridge(SocialBridge):
             return await self._send_reaction(**kwargs)
 
         raise ValueError(f"unknown operation: {operation}")
+
+    async def _send_message(
+        self,
+        *,
+        to: str,
+        text: str,
+        options: dict[str, Any] | None = None,
+        quoted_message_id: str | None = None,
+    ) -> Any:
+        if quoted_message_id:
+            return await self._call(
+                self._client.reply,
+                to,
+                text,
+                quoted_message_id,
+            )
+
+        return await self._call(
+            self._client.sendText,
+            to,
+            text,
+            options,
+        )
 
     async def _send_attachment(
         self,
@@ -274,14 +292,18 @@ class WhatsAppBridge(SocialBridge):
         reaction: str | bool,
         chat_id: str | int | None = None,
     ) -> Any:
+        # Empty string removes an existing reaction; the WPP page API takes the
+        # reaction text as the second argument of sendReactionToMessage.
+        value = "" if reaction is False else str(reaction)
+
         async def operation():
             return await self._client.ThreadsafeBrowser.page_evaluate(
-                """({ messageId, reaction }) =>
-                    WPP.chat.sendReactionToMessage(messageId, reaction)
-                """,
+                """async ({ messageId, reaction }) => {
+                    return await WPP.chat.sendReactionToMessage(messageId, reaction);
+                }""",
                 {
-                    "messageId": message_id,
-                    "reaction": reaction,
+                    "messageId": str(message_id),
+                    "reaction": value,
                 },
                 page=self._client.page,
             )
@@ -309,6 +331,17 @@ class WhatsAppBridge(SocialBridge):
         if message.get("fromMe"):
             return None
 
+        # WPP surfaces a quoted message via ``quotedMsgId`` (serialized id) and
+        # the quoted message object under ``quotedMsg`` / ``_quotedMsgObj``.
+        quoted = message.get("quotedMsg") or message.get("_quotedMsgObj") or {}
+        if not isinstance(quoted, dict):
+            quoted = {}
+        quoted_text = quoted.get("body") or quoted.get("content") or quoted.get("caption")
+        quoted_id = (
+            message.get("quotedMsgId")
+            or (quoted.get("id") if isinstance(quoted.get("id"), str) else None)
+        )
+
         return SocialMessage(
             provider="whatsapp",
             session=self.session,
@@ -321,6 +354,8 @@ class WhatsAppBridge(SocialBridge):
             sender_name=message.get("notifyName"),
             text=str(message.get("body") or message.get("caption") or ""),
             timestamp=self._parse_timestamp(message.get("timestamp") or message.get("t")),
+            reply_to_message_id=str(quoted_id) if quoted_id else None,
+            reply_to_text=str(quoted_text) if quoted_text else None,
             raw=message,
         )
 

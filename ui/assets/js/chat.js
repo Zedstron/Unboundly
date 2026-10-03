@@ -5,6 +5,7 @@ let messageCounter = 0;
 const presenceMap = new Map();
 
 const messageTickMap = new Map();
+const messageElMap = new Map();
 
 const convList = document.getElementById('conv-list');
 const messagesBox = document.getElementById('messages');
@@ -175,13 +176,22 @@ function showHome() {
     input.value = '';
     messagesBox.querySelectorAll('.msg').forEach(message => message.remove());
     messageTickMap.clear();
+    messageElMap.clear();
 }
 
 async function loadConversation() {
     try {
         const r = await fetch(`/api/${personaId}/conversation/` + getConversationId());
         const messages = await r.json();
-        messages.forEach(m => addMessage(m.content, m.direction, m.status, m.created_at, m.id));
+        messages.forEach(m => addMessage(
+            m.content,
+            m.direction,
+            m.status,
+            m.created_at,
+            m.id,
+            m.reply_to_message_id,
+            m.reply_to_text
+        ));
     } catch (e) { console.log(e); }
 }
 
@@ -559,12 +569,19 @@ function connectWebSocket() {
 
                 if (message.type === 'message') {
                     if (pid === personaId) {
-                        addMessage(message.text, 'bot', 'seen', message.created_at, message.message_id);
+                        addMessage(message.text, 'bot', 'seen', message.created_at, message.message_id, message.reply_to_message_id, message.reply_to_text);
                         updateConvLastMessage(pid, message.text, 'bot');
                         markAllUserMessagesSeen();
                     } else {
                         updateConvLastMessage(pid, message.text, 'bot');
                         updateConvTickStatus(pid, 'seen');
+                    }
+                } else if (message.type === 'reaction') {
+                    // Persona reacted to an earlier message instead of replying.
+                    if (pid === personaId) {
+                        addReaction(message.target_message_id, message.reaction);
+                        updateConvLastMessage(pid, `${message.reaction} reacted`, 'bot');
+                        markAllUserMessagesSeen();
                     }
                 } else if (message.type === "status") {
                     updateMessageStatus(message.message_id, message.status, pid);
@@ -614,7 +631,20 @@ setInterval(() => {
     if (personaId) chatStatus.textContent = formatPresence(presenceMap.get(personaId));
 }, 30000);
 
-function addMessage(text, who, tickStatus = '', when = false, messageId = null) {
+function quotePreviewText(replyToMessageId, replyToText) {
+    if (replyToText) return replyToText;
+
+    // Fall back to the text of the message being quoted, if it is on screen.
+    if (replyToMessageId != null) {
+        const target = messageElMap.get(String(replyToMessageId));
+        const textEl = target && target.querySelector('.msg-text');
+        if (textEl) return textEl.textContent;
+    }
+
+    return '';
+}
+
+function addMessage(text, who, tickStatus = '', when = false, messageId = null, replyToMessageId = null, replyToText = null) {
     const msg = document.createElement('div');
     const isUser = who === 'user' || who === 'out';
     msg.className = `msg max-w-[65%] px-2 py-1.5 rounded-lg relative my-0.5 break-words leading-[1.37] text-[14.2px] shadow-[0_1px_.5px_rgba(0,0,0,.13)] z-10 ${isUser ? 'user bg-[#d9fdd3] dark:bg-[#005c4b] text-[#111b21] dark:text-[#e9edef] ml-auto rounded-tr-none' : 'bot bg-white dark:bg-[#202c33] text-[#111b21] dark:text-[#e9edef] mr-auto rounded-tl-none'}`;
@@ -622,6 +652,7 @@ function addMessage(text, who, tickStatus = '', when = false, messageId = null) 
     if (messageId != null) {
         msg.dataset.messageId = messageId;
         messageTickMap.set(String(messageId), { el: msg, status: isUser ? (tickStatus || 'sent') : null });
+        messageElMap.set(String(messageId), msg);
     }
 
     const time = when || getTime();
@@ -632,7 +663,17 @@ function addMessage(text, who, tickStatus = '', when = false, messageId = null) 
         tickHtml = TICK_SVG[status] || TICK_SVG.sent;
     }
 
+    // A reply renders a small quoted preview above its own text.
+    let quoteHtml = '';
+    if (replyToMessageId != null || replyToText) {
+        const preview = quotePreviewText(replyToMessageId, replyToText) || 'Message';
+        const trimmed = preview.length > 140 ? preview.slice(0, 140) + '…' : preview;
+        quoteHtml = `
+            <span class="msg-quote block border-l-[3px] border-[#53bdeb] dark:border-[#53bdeb] rounded-sm bg-black/[.05] dark:bg-white/[.06] px-2 py-1 mb-1 text-[12.5px] text-[#667781] dark:text-[#8696a0] truncate" data-reply-to="${replyToMessageId != null ? escapeHtml(String(replyToMessageId)) : ''}">${linkify(escapeHtml(trimmed))}</span>`;
+    }
+
     msg.innerHTML = `
+        ${quoteHtml}
         <span class="msg-text text-[#111b21] dark:text-[#e9edef] mr-[60px] min-w-[60px]">${linkify(escapeHtml(text))}</span>
         <span class="meta-row absolute bottom-1.5 right-2 flex items-center gap-1">
           <span class="timestamp text-[11px] text-[#667781] dark:text-[#8696a0] whitespace-nowrap">${time}</span>
@@ -644,6 +685,30 @@ function addMessage(text, who, tickStatus = '', when = false, messageId = null) 
     messagesBox.scrollTop = messagesBox.scrollHeight;
     messageCounter++;
     return msg;
+}
+
+function addReaction(targetMessageId, reaction) {
+    if (!reaction) return;
+
+    let msgEl = null;
+    if (targetMessageId != null) {
+        msgEl = messageElMap.get(String(targetMessageId))
+            || messagesBox.querySelector(`.msg[data-message-id="${targetMessageId}"]`);
+    }
+    if (!msgEl) {
+        // Fall back to the most recent message in the open conversation.
+        const all = messagesBox.querySelectorAll('.msg');
+        msgEl = all[all.length - 1];
+    }
+    if (!msgEl) return;
+
+    let badge = msgEl.querySelector('.msg-reaction');
+    if (!badge) {
+        badge = document.createElement('span');
+        badge.className = 'msg-reaction absolute -bottom-2.5 left-1 rounded-full bg-[#e9edef] dark:bg-[#2a3942] px-1 text-[12px] leading-4 shadow';
+        msgEl.appendChild(badge);
+    }
+    badge.textContent = reaction;
 }
 
 function updateLastUserTick(status, messageId = null) {
@@ -720,6 +785,7 @@ function updateConvTickStatus(pid, status) {
 function clearVisibleMessages() {
     messagesBox.querySelectorAll('.msg').forEach(message => message.remove());
     messageTickMap.clear();
+    messageElMap.clear();
     updateConvLastMessage(personaId, '', 'bot');
 }
 

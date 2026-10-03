@@ -6,6 +6,7 @@ from langgraph.graph import END, START, StateGraph
 from redis.asyncio import Redis
 
 from app.core.config import settings
+from app.domain.models import AgentResponse
 from app.infrastructure.ai import AIProvider
 from app.infrastructure.memory import LongTermMemory, ShortTermMemory
 
@@ -67,7 +68,9 @@ class PersonaAgentGraph:
         sender_name: str | None = None,
         source: str | None = None,
         text: str | None = None,
-    ) -> str:
+        reply_to_message_id: str | None = None,
+        reply_to_text: str | None = None,
+    ) -> AgentResponse:
         result = await self.graph.ainvoke(
             {
                 "operation": "reply",
@@ -78,9 +81,11 @@ class PersonaAgentGraph:
                 "sender_name": sender_name,
                 "source": source,
                 "text": text,
+                "reply_to_message_id": reply_to_message_id,
+                "reply_to_text": reply_to_text,
             }
         )
-        return result["reply"]
+        return result["agent_response"]
 
     async def remember_message(
         self,

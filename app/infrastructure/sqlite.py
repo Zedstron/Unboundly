@@ -39,7 +39,9 @@ async def init_db() -> None:
             ("source", "VARCHAR(30)"),
             ("external_id", "VARCHAR(255)"),
             ("sender_id", "VARCHAR(255)"),
-            ("sender_name", "VARCHAR(255)")
+            ("sender_name", "VARCHAR(255)"),
+            ("reply_to_message_id", "VARCHAR(255)"),
+            ("reply_to_text", "TEXT")
         ):
             if name not in columns:
                 await connection.execute(text(f"ALTER TABLE conversation_messages ADD COLUMN {name} {definition}"))
@@ -76,7 +78,9 @@ async def save_message(
     source: str | None = None,
     external_id: str | None = None,
     sender_id: str | None = None,
-    sender_name: str = "Unknown"
+    sender_name: str = "Unknown",
+    reply_to_message_id: str | None = None,
+    reply_to_text: str | None = None,
 ) -> int:
     if direction not in ("user", "bot"):
         raise ValueError("direction must be either 'user' or 'bot'")
@@ -94,7 +98,9 @@ async def save_message(
             source=source,
             external_id=external_id,
             sender_id=sender_id,
-            sender_name=sender_name
+            sender_name=sender_name,
+            reply_to_message_id=reply_to_message_id,
+            reply_to_text=reply_to_text,
         )
 
         session.add(message)
@@ -112,6 +118,17 @@ async def get_message_by_external_id(source: str, external_id: str):
                 ConversationMessage.source == source,
                 ConversationMessage.external_id == external_id,
             ).limit(1)
+        )
+        return result.scalars().first()
+
+
+async def get_external_id(message_id: int) -> str | None:
+    """The provider message id for a stored message, used as a reply target."""
+    async with SessionFactory() as session:
+        result = await session.execute(
+            select(ConversationMessage.external_id).where(
+                ConversationMessage.id == message_id
+            )
         )
         return result.scalars().first()
 
@@ -212,7 +229,10 @@ async def get_unread_user_messages(persona_id: str) -> list[dict]:
                 "created_at": message.created_at,
                 "source": message.source,
                 "sender_id": message.sender_id,
-                "sender_name": message.sender_name
+                "sender_name": message.sender_name,
+                "external_id": message.external_id,
+                "reply_to_message_id": message.reply_to_message_id,
+                "reply_to_text": message.reply_to_text,
             }
             for message in result.scalars().all()
         ]
@@ -294,6 +314,8 @@ async def get_conversation(persona_id: str, conversation_id: str, limit: int | N
                 "content": message.content,
                 "status": message.status,
                 "created_at": message.created_at.isoformat(),
+                "reply_to_message_id": message.reply_to_message_id,
+                "reply_to_text": message.reply_to_text,
             }
             for message in messages
         ]
@@ -409,6 +431,9 @@ async def get_last_user_message(persona_id: str, conversation_id: str) -> dict[s
             "source": message.source,
             "sender_id": message.sender_id,
             "sender_name": message.sender_name,
+            "external_id": message.external_id,
+            "reply_to_message_id": message.reply_to_message_id,
+            "reply_to_text": message.reply_to_text,
             "created_at": message.created_at,
         }
 

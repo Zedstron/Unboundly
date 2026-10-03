@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.domain.mood import MoodEngine, MoodState
 from app.infrastructure.memory import ShortTermMemory
-from app.domain.models import Decision
+from app.domain.models import AgentResponse, Decision
 from app.services.bridges.models import SocialMessage, Operation
 from app.domain.behavior import BehaviorContext, BehaviorEngine
 from app.agents.persona_graph import PersonaAgentGraph
@@ -159,7 +159,9 @@ class ConversationService:
                 source=message.provider,
                 external_id=message.message_id,
                 sender_id=message.sender_id,
-                sender_name=message.sender_name
+                sender_name=message.sender_name,
+                reply_to_message_id=message.reply_to_message_id,
+                reply_to_text=message.reply_to_text,
             )
 
             logger.debug(f"[ConversationService.ingest] User message saved: message_id={message_id}")
@@ -241,6 +243,9 @@ class ConversationService:
             "source": message.provider,
             "sender_id": message.sender_id,
             "sender_name": message.sender_name,
+            "reply_to_message_id": message.reply_to_message_id,
+            "reply_to_text": message.reply_to_text,
+            "reply_to_external_id": message.message_id,
         }
 
     @staticmethod
@@ -321,7 +326,9 @@ class ConversationService:
         sender_id: str | None = None,
         sender_name: str | None = None,
         text: str | None = None,
-    ) -> str:
+        reply_to_message_id: str | None = None,
+        reply_to_text: str | None = None,
+    ) -> AgentResponse:
         logger.info(f"[ConversationService.generate_reply] Generating reply for conversation_id={conversation_id}, persona_id={self.persona['id']}")
         try:
             logger.debug(f"[ConversationService.generate_reply] Marking conversation messages as seen before typing")
@@ -337,7 +344,7 @@ class ConversationService:
                 start = time_module.time()
                 state = self.states.get(conversation_id) or await self._load_state()
                 self.states[conversation_id] = state
-                reply = await self.agent.generate_reply(
+                response = await self.agent.generate_reply(
                     conversation_id,
                     state.values,
                     initiative=initiative,
@@ -345,11 +352,13 @@ class ConversationService:
                     sender_name=sender_name,
                     source=source,
                     text=text,
+                    reply_to_message_id=reply_to_message_id,
+                    reply_to_text=reply_to_text,
                 )
                 elapsed = time_module.time() - start
 
-                logger.info(f"[ConversationService.generate_reply] AI reply generated in {elapsed:.2f}s: conversation_id={conversation_id}, reply_length={len(reply)}")
-                return reply
+                logger.info(f"[ConversationService.generate_reply] AI response generated in {elapsed:.2f}s: conversation_id={conversation_id}, type={response.type}")
+                return response
             finally:
                 if source is None or source == "local":
                     logger.debug(f"[ConversationService.generate_reply] Clearing typing indicator")
@@ -601,7 +610,10 @@ class ConversationService:
                     "content": message["content"],
                     "source": message["source"],
                     "sender_id": message["sender_id"],
-                    "sender_name": message["sender_name"]
+                    "sender_name": message["sender_name"],
+                    "external_id": message.get("external_id"),
+                    "reply_to_message_id": message.get("reply_to_message_id"),
+                    "reply_to_text": message.get("reply_to_text"),
                 })
 
             await self._save_state(state)
@@ -622,6 +634,9 @@ class ConversationService:
                             "source": action["source"],
                             "sender_id": action["sender_id"],
                             "sender_name": action["sender_name"],
+                            "reply_to_message_id": action.get("reply_to_message_id"),
+                            "reply_to_text": action.get("reply_to_text"),
+                            "reply_to_external_id": action.get("external_id"),
                         },
                         time() + delay,
                     )
@@ -636,6 +651,9 @@ class ConversationService:
                             "source": action["source"],
                             "sender_id": action["sender_id"],
                             "sender_name": action["sender_name"],
+                            "reply_to_message_id": action.get("reply_to_message_id"),
+                            "reply_to_text": action.get("reply_to_text"),
+                            "reply_to_external_id": action.get("external_id"),
                         },
                         time(),
                     )

@@ -9,6 +9,8 @@ class PersonaGraphState(TypedDict, total=False):
     sender_name: str | None
     source: str | None
     text: str
+    reply_to_message_id: str | None
+    reply_to_text: str | None
     initiative: str | None
     mood: dict[str, float]
     contact: dict[str, Any] | None

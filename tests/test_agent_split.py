@@ -44,7 +44,7 @@ def _state(**overrides) -> PersonaGraphState:
         ],
         "short_memories": [{"content": "likes tea"}],
         "long_memories": [{"content": "has a dog"}],
-        "agent_response": AgentResponse(response="congrats!"),
+        "agent_response": AgentResponse(type="text", text="congrats!"),
     }
     base.update(overrides)
     return base
@@ -109,11 +109,11 @@ async def test_decide_memories_node_initiative_overrides_exchange():
 
 def test_agent_response_is_reply_only():
     # The message agent output must not carry memories or trust anymore.
-    response = AgentResponse(response="hi")
-    assert response.model_dump() == {"response": "hi"}
+    response = AgentResponse(type="text", text="hi")
+    assert response.model_dump() == {"type": "text", "text": "hi", "reaction": None}
 
     with pytest.raises(Exception):
-        AgentResponse(response="")  # empty replies are invalid
+        AgentResponse(type="text", text="")  # empty replies are invalid
 
 
 def test_memory_decision_clamps_trust_factor():

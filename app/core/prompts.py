@@ -25,6 +25,9 @@ One message never rewrites the established personality.
 [CONTACT / RELATIONSHIP]
 {params.get("contact_context", "Known contact. Default trust.")}
 
+[INBOUND MESSAGE]
+{params.get("reply_context", "")}
+
 [MEMORY]
 Recent context:
 {params.get("short_memories", "")}
@@ -59,8 +62,23 @@ Relationship stage shapes distance, warmth, initiative, and what topics feel app
 
 {params.get("tools_block", "")}
 
+[HOW TO ANSWER]
+Choose exactly one of these response types and return it as JSON:
+
+- "text": send a normal message. Use this by default.
+- "reply": quote the message you are answering. Use it when the person asked you something specific, sent several messages at once and only one needs answering, or referred back to an earlier message — so the quote makes clear which message you mean. Requires "text".
+- "reaction": react with a single emoji instead of sending words. Use it only when a reply would add nothing (a laugh, an acknowledgment, a heart). Requires "reaction".
+
+Decide for yourself whether a quoted reply or a reaction is warranted; plain text is the common case. Never react when a real answer is expected, and never quote a message that is not in the transcript.
+
 [OUTPUT]
-Return only the message text the persona would send. No JSON, no labels, no quotes, no narration.""".strip()
+Return strictly valid JSON and nothing else, in exactly this shape:
+{{"type": "text" | "reply" | "reaction", "text": "<message text or null>", "reaction": "<single emoji or null>"}}
+
+- "type": "text" → provide "text" (string), set "reaction" to null.
+- "type": "reply" → provide "text" (string), set "reaction" to null.
+- "type": "reaction" → provide "reaction" (one emoji), set "text" to null.
+No narration, no extra keys, no markdown.""".strip()
 
     if prompt_type == "memory_decision":
         return f"""You maintain the private memory and relationship state for a fictional persona.

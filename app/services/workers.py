@@ -7,7 +7,13 @@ from app.api.routes import service, services
 from app.services.bridges.models import Operation
 from app.services.bridges.registry import registry
 from app.infrastructure.memory import ShortTermMemory
-from app.infrastructure.sqlite import mark_message_seen, save_message, set_external_id
+from app.infrastructure.sqlite import (
+    get_external_id,
+    get_last_user_message,
+    mark_message_seen,
+    save_message,
+    set_external_id,
+)
 
 logger = get_logger(__name__)
 
@@ -174,33 +180,108 @@ async def worker_task(redis: Redis) -> None:
                         # words being sent back as the persona's message).
                         try:
                             start_time = time.time()
-                            payload["text"] = await conversation_service.generate_reply(
+                            response = await conversation_service.generate_reply(
                                 conversation_id,
                                 initiative=payload.get("trigger"),
                                 source=source,
                                 sender_id=payload.get("sender_id"),
                                 sender_name=payload.get("sender_name"),
+                                reply_to_message_id=payload.get("reply_to_message_id"),
+                                reply_to_text=payload.get("reply_to_text"),
                             )
                             elapsed = time.time() - start_time
-                            logger.info(f"[worker_task/reply] Reply generated fresh: conversation_id={conversation_id}, text_length={len(payload['text'])}")
+                            logger.info(f"[worker_task/reply] Response generated fresh in {elapsed:.2f}s: conversation_id={conversation_id}, type={response.type}, text_length={len(response.text or '')}")
                         except Exception as e:
                             logger.error(f"[worker_task/reply] Error generating reply for conversation_id={conversation_id}: {e}", exc_info=True)
                             # Never send a canned fallback: if generation fails,
                             # abort the task instead of risking an echo.
                             continue
 
-                        logger.debug(f"[worker_task/reply] Saving bot message: persona_id={persona_id}, conversation_id={conversation_id}, text_length={len(payload['text'])}")
-                        bot_message_id = await save_message(payload['persona_id'], conversation_id, 'bot', payload["text"], 'seen', source=source)
-                        logger.info(f"[worker_task/reply] Bot message saved: message_id={bot_message_id}, conversation_id={conversation_id}")
+                        # Resolve the provider message id to quote for a reply.
+                        # ``payload`` may already carry the inbound id for a
+                        # normal turn; autonomous follow-ups fall back to the
+                        # conversation's last user message.
+                        target_external_id = payload.get("reply_to_external_id")
+                        if response.type == "reply" and not target_external_id:
+                            target_external_id = await get_external_id(
+                                payload.get("user_message_id")
+                            ) if payload.get("user_message_id") else None
+                        if response.type == "reply" and not target_external_id:
+                            last_user_message = await get_last_user_message(persona_id, conversation_id)
+                            target_external_id = (last_user_message or {}).get("external_id")
+
                         try:
                             await conversation_service.mark_conversation_seen(conversation_id, source=source)
                         except Exception:
                             logger.exception("Failed to mark conversation seen after bot reply: conversation_id=%s", conversation_id)
 
+                        if response.type == "reaction":
+                            # A reaction has no text of its own; it targets the
+                            # inbound message. Nothing is stored as a bot text.
+                            # Bridges address messages by their provider id,
+                            # while the local UI uses our own database id.
+                            if source and source != "local":
+                                reaction_target = payload.get("reply_to_external_id") or target_external_id
+                                if not reaction_target:
+                                    last_user_message = await get_last_user_message(persona_id, conversation_id)
+                                    reaction_target = (last_user_message or {}).get("external_id")
+                            else:
+                                reaction_target = payload.get("user_message_id")
+                                if not reaction_target:
+                                    last_user_message = await get_last_user_message(persona_id, conversation_id)
+                                    reaction_target = (last_user_message or {}).get("id")
+
+                            if not reaction_target:
+                                logger.warning("[worker_task/reaction] No target message id available; skipping reaction: conversation_id=%s", conversation_id)
+                                continue
+
+                            if source and source != "local":
+                                try:
+                                    await bridge_signal(
+                                        payload["persona_id"],
+                                        Operation.SEND_REACTION,
+                                        source=source,
+                                        message_id=reaction_target,
+                                        reaction=response.reaction,
+                                        chat_id=conversation_id,
+                                    )
+                                except Exception:
+                                    logger.exception("Failed to send reaction through bridge %s: conversation_id=%s", source, conversation_id)
+                            else:
+                                channel = f"persona:out:{payload['persona_id']}:{conversation_id}"
+                                await redis.publish(channel, json.dumps({
+                                    "type": "reaction",
+                                    "persona_id": payload["persona_id"],
+                                    "conversation_id": conversation_id,
+                                    "target_message_id": reaction_target,
+                                    "reaction": response.reaction,
+                                }))
+                            continue
+
+                        bot_text = response.text or ""
+                        quoted_message_id = None
+                        if response.type == "reply" and target_external_id:
+                            quoted_message_id = target_external_id
+                        elif response.type == "reply":
+                            # Quoting was requested but no provider id is known;
+                            # degrade to a normal text message rather than fail.
+                            logger.warning("[worker_task/reply] Quote requested but no external message id found; sending plain text: conversation_id=%s", conversation_id)
+
+                        logger.debug(f"[worker_task/reply] Saving bot message: persona_id={persona_id}, conversation_id={conversation_id}, text_length={len(bot_text)}")
+                        bot_message_id = await save_message(payload['persona_id'], conversation_id, 'bot', bot_text, 'seen', source=source)
+                        logger.info(f"[worker_task/reply] Bot message saved: message_id={bot_message_id}, conversation_id={conversation_id}")
+
                         if source and source != "local":
                             # Route reply directly to bridge
                             try:
-                                result = await bridge_signal(payload["persona_id"], Operation.SEND_MESSAGE, source=source, to=conversation_id, text=payload["text"])
+                                result = await bridge_signal(
+                                    payload["persona_id"],
+                                    Operation.SEND_MESSAGE,
+                                    source=source,
+                                    to=conversation_id,
+                                    text=bot_text,
+                                    quoted_message_id=quoted_message_id,
+                                )
                                 external_id = transport_message_id(result)
                                 if external_id:
                                     await set_external_id(bot_message_id, source, external_id)
@@ -216,7 +297,8 @@ async def worker_task(redis: Redis) -> None:
                                 "persona_id": payload["persona_id"],
                                 "conversation_id": conversation_id,
                                 "message_id": bot_message_id,
-                                "text": payload["text"],
+                                "text": bot_text,
+                                "reply_to_message_id": quoted_message_id,
                             }))
                             logger.debug(f"[worker_task/reply] Bot message published: conversation_id={conversation_id}")
 

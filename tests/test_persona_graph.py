@@ -11,7 +11,7 @@ class FakeAI:
     async def chat(self, messages, *, temperature):
         assert messages[0]["role"] == "system"
         assert temperature == 0.85
-        return AgentResponse(response="that is sweet")
+        return AgentResponse(type="text", text="that is sweet")
 
     async def decide_memories(self, messages, *, temperature):
         assert temperature == 0.0
@@ -60,7 +60,8 @@ async def _run_graph(monkeypatch):
     reply = await agent.generate_reply("conversation", {"valence": 0.4})
 
     assert event == "compliment"
-    assert reply == "that is sweet"
+    assert reply.type == "text"
+    assert reply.text == "that is sweet"
 
 
 def test_persona_agent_graph_executes_classification_and_reply_paths(monkeypatch):
