@@ -188,6 +188,7 @@ async def worker_task(redis: Redis) -> None:
                                 sender_name=payload.get("sender_name"),
                                 reply_to_message_id=payload.get("reply_to_message_id"),
                                 reply_to_text=payload.get("reply_to_text"),
+                                confide_context=payload.get("confide_context"),
                             )
                             elapsed = time.time() - start_time
                             logger.info(f"[worker_task/reply] Response generated fresh in {elapsed:.2f}s: conversation_id={conversation_id}, type={response.type}, text_length={len(response.text or '')}")

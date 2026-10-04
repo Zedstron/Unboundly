@@ -12,6 +12,7 @@ class PersonaGraphState(TypedDict, total=False):
     reply_to_message_id: str | None
     reply_to_text: str | None
     initiative: str | None
+    confide_context: str | None
     mood: dict[str, float]
     contact: dict[str, Any] | None
     allowed_events: list[str]

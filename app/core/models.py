@@ -54,6 +54,9 @@ class Contact(Base):
     relationship: Mapped[str | None] = mapped_column(String(30), nullable=True, default=None)
     source: Mapped[str | None] = mapped_column(String(30), nullable=True)
     is_unknown: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Durable memory of how much this contact has pestered the persona
+    # (0.0 to 1.0, decays over time). Distinct from mood, which is transient.
+    annoyance: Mapped[float] = mapped_column(default=0.0, nullable=False)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

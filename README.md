@@ -56,6 +56,7 @@ The result: virtual characters with a genuine sense of presence, pacing, and per
 | | |
 |---|---|
 | 🎭 **Authentic Personas** | Rich JSON-defined characters with configurable traits and biography |
+| 🕵️ **Social Awareness** | Detects pestering contacts, tracks annoyance, and confides in a trusted confidant |
 | 🌊 **Dynamic Mood Engine** | Multi-dimensional emotional states that evolve, decay, and react to events |
 | ⏳ **Realistic Pacing** | Probabilistic online/busy/reply behavior instead of instant robotic replies |
 | 🤝 **Trust & Relationships** | Hidden per-contact trust score that maps to named relationship stages |
@@ -175,9 +176,11 @@ Inbound Message (local UI · WhatsApp · Instagram)
     │
     ▼
 ConversationService.ingest
+    ├── Idempotency guard (drop re-delivered provider messages)
     ├── Load persona + current mood state
-    ├── Classify event → update & decay mood
     ├── Persist message (SQLite) + tag replies
+    ├── Social awareness → pester level · annoyance · mood event
+    ├── Confidant check → queue rate-limited `confide` task
     ├── Unknown-contact gate (REPLY_UNKNOWN_CONTACTS)
     └── Behavior Engine decision
           ├── NO_REPLY       → queue memory-only task
@@ -186,11 +189,13 @@ ConversationService.ingest
     │
     ▼
 Background Worker (Redis sorted-set scheduler + 30s life ticks)
+    ├── reply_pending · memory_pending · follow_up
+    └── confide (persona vents about a pestering contact)
     │
     ▼
 LangGraph reply workflow
     ├── retrieve_context   (history · short memory · long memory · contact/trust)
-    ├── build_prompt       (persona · mood · relationship · reply context · memories)
+    ├── build_prompt       (persona · mood · relationship · reply/confide context · memories)
     ├── generate_response  (message agent — JSON: text | reply | reaction)
     └── fan-out ─┬─ decide_memories  (memory agent — facts + trust delta)
                  └─ postprocess_response
@@ -223,6 +228,7 @@ Persist → SQLite (history) · Redis (mood + memory + presence)
 
 - `behavior.py` — **Behavior Engine**: decides if/when a persona responds, from mood, availability, and context
 - `mood.py` — **Mood State Management**: valence, arousal, irritability, affection, curiosity, fear, with time-based decay and biological-cycle modifiers
+- `awareness.py` — **Social Awareness**: classifies pestering contacts (neutral → notice → annoyed → harassed), maps them to mood events, and selects a trusted confidant
 - `relationship.py` — **Relationship Stages**: maps the hidden trust score to named stages (stranger → engaged → family / blocked) and renders prompt guidance
 - `models.py` — Core domain models (`Decision`, `AgentResponse`, `Memory`, `MemoryDecision`, `MessageIn`, `ContactInfo`)
 
@@ -232,8 +238,8 @@ Persist → SQLite (history) · Redis (mood + memory + presence)
 <summary><strong>🔌 <code>app/infrastructure/</code> — External System Integration</strong></summary>
 
 - `ai.py` — AI provider (OpenAI-compatible): chat, tool-use loop, structured memory decisions, embeddings
-- `memory.py` — **ShortTermMemory** (Redis list) and **LongTermMemory** (Redis vector store with cosine search)
-- `sqlite.py` — Async SQLite persistence (conversations, persona state, contacts/trust)
+- `memory.py` — **ShortTermMemory** (Redis list) plus rolling contact-activity windows, reply/confide claims, and **LongTermMemory** (Redis vector store with cosine search)
+- `sqlite.py` — Async SQLite persistence (conversations, persona state, contacts/trust/annoyance)
 - `persona.py` — `PersonaStore`: filesystem JSON persona definitions
 - `mcp.py` — Model Context Protocol client registry for optional tool use
 
@@ -272,11 +278,12 @@ Persist → SQLite (history) · Redis (mood + memory + presence)
 
 1. **Behavior Engine** (`app/domain/behavior.py`) — Probabilistic decision-making: ignore, read, reply later, or reply now.
 2. **Mood System** (`app/domain/mood.py`) — Multi-dimensional emotional state that decays over time and shifts with events.
-3. **Contact & Trust** (`app/domain/relationship.py`, `app/infrastructure/sqlite.py`) — Persistent contact directory with a hidden `trust ∈ [-1.0, 1.0]` and derived relationship stage. Unknown numbers default to `0.0` (stranger) and can be ignored via `.env`.
+3. **Contact & Trust** (`app/domain/relationship.py`, `app/infrastructure/sqlite.py`) — Persistent contact directory with a hidden `trust ∈ [-1.0, 1.0]`, a derived relationship stage, and a durable `annoyance ∈ [0, 1]` pester score. Unknown numbers default to `0.0` (stranger, `is_unknown=true`) and can be ignored via `.env`.
 4. **LangGraph Agent** (`app/agents/persona_graph.py`) — Two-agent fan-out: a message agent (JSON text/reply/reaction) and a memory agent (facts + trust delta), joined by a persistence node.
 5. **Memory** (`app/infrastructure/memory.py`) — Short-term Redis context plus semantic long-term vector recall.
-6. **Worker & Scheduler** (`app/services/workers.py`) — Life ticks, delayed replies (Redis sorted set), and proactive follow-ups.
+6. **Worker & Scheduler** (`app/services/workers.py`) — Life ticks, delayed replies (Redis sorted set), proactive follow-ups, and `confide` (venting) tasks.
 7. **Transport Bridges** (`app/services/bridges/`) — WhatsApp and Instagram providers behind one interface, plus local UI pub/sub.
+8. **Social Awareness** (`app/domain/awareness.py`) — Pester detection from rolling activity windows, a durable per-contact annoyance score, and confidant selection for the `confide` initiative.
 
 ---
 
@@ -328,6 +335,28 @@ Personas are defined declaratively in JSON (e.g., `personas/munazza.json`), maki
     "delay_seconds": { "min": 30, "max": 600, "mode": 120 },
     "time_windows": [[8, 11], [13, 16], [19, 23]],
     "triggers": [{ "type": "check_in", "weight": 1 }]
+  },
+  "social_awareness": {
+    "enabled": true,
+    "min_confidant_trust": 0.72,
+    "share_contact_identity": false,
+    "confide_cooldown_minutes": 720,
+    "confide_global_cooldown_minutes": 240,
+    "daily_confide_budget": 2,
+    "confide_delay_seconds": 90,
+    "annoyance_decay_per_hour": 0.08,
+    "time_windows": [[8, 23]],
+    "thresholds": {
+      "notice_burst_2m": 3,
+      "notice_sustained_10m": 5,
+      "notice_unanswered": 4,
+      "annoyed_sustained_10m": 8,
+      "annoyed_hourly": 12,
+      "annoyed_unanswered": 8,
+      "harassed_hourly": 15,
+      "harassed_daily": 30,
+      "harassed_unanswered": 15
+    }
   }
 }
 ```
@@ -341,6 +370,7 @@ Personas are defined declaratively in JSON (e.g., `personas/munazza.json`), maki
 | **`availability`** | Hour-by-hour online/busy probability and response timing patterns |
 | **`event_weights`** | How specific conversation events shift the persona's mood |
 | **`self_trigger`** | Rules for persona-initiated follow-ups (windows, idle time, daily budget) |
+| **`social_awareness`** | Pester thresholds, confidant trust floor, and confide rate limits (see below) |
 
 ---
 
@@ -365,6 +395,20 @@ The persona's message agent answers with a small JSON envelope so it can decide,
 
 - **Inbound** — WhatsApp (`quotedMsgId` / `quotedMsg`) and Instagram (`replied_to_message` / `reply`) quotes are detected and tagged on the message, then surfaced to the agent so it knows a message is a reply and what was quoted.
 - **Outbound** — the worker resolves the provider message id and sends a native quoted reply (WhatsApp `reply`, Instagram `direct_send(reply_to_message=…)`) or a native reaction.
+
+---
+
+## 🕵️ Social Awareness & Pestering
+
+Real people push back when someone messages them non-stop — and they tell someone they trust about it. Unboundly models that with a deterministic awareness layer that runs during `ingest`, before the behavior decision:
+
+1. **Detect** — every inbound message is recorded in a rolling Redis window. `evaluate_pestering` combines the counts (`burst_2m`, `sustained_10m`, `hourly`, `daily`) with the unanswered streak to classify the contact as `neutral → notice → annoyed → harassed`. Unknown contacts are held to strict thresholds; known contacts are treated twice as leniently.
+2. **Feel** — crossing a level applies the `pestering` (or `boundary_push`) mood event, so irritability/valence shift naturally and the persona's tone changes on its own. A durable `annoyance ∈ [0, 1]` score is also decayed and raised on the contact row.
+3. **Confide** — at `annoyed` or above, the persona may queue a `confide` task: a one-off, self-initiated message to its **highest-trust vetted contact** (trust ≥ `min_confidant_trust`, never the offender). The vent is rate-limited per offender+confidant pair, persona-wide, and per day, and is generated by the normal reply pipeline with a sanitized `CONFIDING IN THIS PERSON` prompt block.
+
+Privacy defaults to guarded: `share_contact_identity: false` means the persona talks about "an unsaved contact" rather than naming the sender, and phone numbers/usernames are never exposed.
+
+> **Note:** configuring `social_awareness` is optional. Leave it absent or `enabled: false` and ingestion behaves exactly as before.
 
 ---
 
@@ -442,7 +486,7 @@ All REST endpoints are served under `/api`, with a live WebSocket at `/api/ws`.
 persona/
 ├── app/
 │   ├── core/               # Config, logging, ORM models, prompts, lifecycle
-│   ├── domain/             # Behavior, mood, relationship stages, domain models
+│   ├── domain/             # Behavior, mood, awareness, relationship stages, models
 │   ├── infrastructure/     # AI, memory, SQLite, persona store, MCP
 │   ├── agents/             # LangGraph workflow and nodes
 │   ├── services/           # Conversation orchestration, worker, bridges
@@ -527,6 +571,7 @@ MCP_SERVER_URLS=
 - [x] Long-term semantic memory (Redis vector store)
 - [x] WhatsApp & Instagram bridges with realtime ingestion
 - [x] Structured message types: text, quoted reply, and reaction
+- [x] Social awareness: pestering detection, contact annoyance, and the confide-in-a-confidant initiative
 - [ ] **Voice and image message types** (schema reserved; not yet implemented)
 - [ ] Multi-persona conversation dynamics
 - [ ] More sophisticated context windowing for longer conversations

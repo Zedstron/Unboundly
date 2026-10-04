@@ -62,6 +62,15 @@
         "valence": 0.1,
         "fear": -0.08,
         "affection": 0.05
+      },
+      "pestering": {
+        "valence": -0.06,
+        "irritability": 0.08
+      },
+      "boundary_push": {
+        "valence": -0.12,
+        "arousal": 0.1,
+        "irritability": 0.16
       }
     }
   },
@@ -118,6 +127,28 @@
       "emoji_probability": 0.22,
       "double_text_probability": 0.08,
       "short_reply_probability": 0.38
+    }
+  },
+  "social_awareness": {
+    "enabled": true,
+    "min_confidant_trust": 0.72,
+    "share_contact_identity": false,
+    "confide_cooldown_minutes": 720,
+    "confide_global_cooldown_minutes": 240,
+    "daily_confide_budget": 2,
+    "confide_delay_seconds": 90,
+    "annoyance_decay_per_hour": 0.08,
+    "time_windows": [[8, 23]],
+    "thresholds": {
+      "notice_burst_2m": 3,
+      "notice_sustained_10m": 5,
+      "notice_unanswered": 4,
+      "annoyed_sustained_10m": 8,
+      "annoyed_hourly": 12,
+      "annoyed_unanswered": 8,
+      "harassed_hourly": 15,
+      "harassed_daily": 30,
+      "harassed_unanswered": 15
     }
   },
   "self_trigger": {

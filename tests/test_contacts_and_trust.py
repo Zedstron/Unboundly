@@ -18,6 +18,7 @@ class FakeRedis:
     def __init__(self):
         self.data = {}
         self.published = []
+        self.zsets = {}
 
     async def get(self, key):
         return self.data.get(key)
@@ -43,8 +44,32 @@ class FakeRedis:
     async def expire(self, key, ttl):
         pass
 
+    async def incr(self, key):
+        value = int(self.data.get(key, 0)) + 1
+        self.data[key] = value
+        return value
+
+    async def decr(self, key):
+        value = int(self.data.get(key, 0)) - 1
+        self.data[key] = value
+        return value
+
     async def zadd(self, key, mapping):
-        pass
+        members = self.zsets.setdefault(key, {})
+        for member, score in mapping.items():
+            members[member] = float(score)
+        return len(mapping)
+
+    async def zcount(self, key, minimum, maximum):
+        members = self.zsets.get(key, {})
+        return sum(1 for score in members.values() if minimum <= score <= maximum)
+
+    async def zremrangebyscore(self, key, minimum, maximum):
+        members = self.zsets.get(key, {})
+        removed = [m for m, score in members.items() if minimum <= score <= maximum]
+        for member in removed:
+            del members[member]
+        return len(removed)
 
 
 def dummy_persona():

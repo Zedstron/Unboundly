@@ -61,6 +61,8 @@ async def init_db() -> None:
             # Existing contacts keep NULL; the relationship is recomputed from
             # trust on read until the next explicit save rewrites it.
             await connection.execute(text("ALTER TABLE contacts ADD COLUMN relationship VARCHAR(30)"))
+        if "annoyance" not in contact_columns:
+            await connection.execute(text("ALTER TABLE contacts ADD COLUMN annoyance FLOAT NOT NULL DEFAULT 0"))
 
     # Backfill the stored relationship stage for legacy rows so the
     # column is always populated on read. Runs through the async session
@@ -111,14 +113,29 @@ async def save_message(
         return message.id
 
 
-async def get_message_by_external_id(source: str, external_id: str):
+async def get_message_by_external_id(
+    source: str,
+    external_id: str,
+    persona_id: str | None = None,
+    direction: str | None = None,
+):
+    """Look up a stored message by its provider id.
+
+    Used to make ingestion idempotent: a bridge that re-emits (or replays)
+    the same inbound message must not create a second conversation row and a
+    second reply. ``persona_id``/``direction`` narrow the match when known.
+    """
+    query = select(ConversationMessage).where(
+        ConversationMessage.source == source,
+        ConversationMessage.external_id == external_id,
+    )
+    if persona_id is not None:
+        query = query.where(ConversationMessage.persona_id == persona_id)
+    if direction is not None:
+        query = query.where(ConversationMessage.direction == direction)
+
     async with SessionFactory() as session:
-        result = await session.execute(
-            select(ConversationMessage).where(
-                ConversationMessage.source == source,
-                ConversationMessage.external_id == external_id,
-            ).limit(1)
-        )
+        result = await session.execute(query.limit(1))
         return result.scalars().first()
 
 
@@ -573,6 +590,7 @@ async def _contact_row_dict(row: Contact) -> dict[str, Any]:
         "relationship": stage_value,
         "source": row.source,
         "is_unknown": bool(row.is_unknown),
+        "annoyance": float(row.annoyance or 0.0),
         "created_at": row.created_at,
         "updated_at": row.updated_at,
         "relationship_payload": payload,
@@ -715,6 +733,77 @@ async def update_contact_trust(
     _PINNED_STAGES = {RelationshipStage.FAMILY.value, RelationshipStage.BLOCKED.value}
 
     return await _update()
+
+
+async def update_contact_annoyance(
+    persona_id: str,
+    contact_id: str,
+    annoyance: float,
+) -> dict[str, Any] | None:
+    """Set a contact's pester-annoyance score (clamped to 0..1)."""
+    clean = max(0.0, min(1.0, float(annoyance)))
+    async with SessionFactory() as session:
+        result = await session.execute(
+            select(Contact).where(
+                Contact.persona_id == persona_id,
+                Contact.contact_id == contact_id,
+            ).limit(1)
+        )
+        row = result.scalars().first()
+        if row is None:
+            return None
+        row.annoyance = clean
+        await session.commit()
+        await session.refresh(row)
+        return await _contact_row_dict(row)
+
+
+async def count_unanswered_user_messages(
+    persona_id: str,
+    conversation_id: str,
+) -> int:
+    """Inbound messages received since the persona's last reply in a thread."""
+    async with SessionFactory() as session:
+        last_bot_id = (await session.execute(
+            select(func.max(ConversationMessage.id)).where(
+                ConversationMessage.persona_id == persona_id,
+                ConversationMessage.conversation_id == conversation_id,
+                ConversationMessage.direction == "bot",
+            )
+        )).scalar()
+
+        query = select(func.count()).select_from(ConversationMessage).where(
+            ConversationMessage.persona_id == persona_id,
+            ConversationMessage.conversation_id == conversation_id,
+            ConversationMessage.direction == "user",
+        )
+        if last_bot_id is not None:
+            query = query.where(ConversationMessage.id > last_bot_id)
+
+        return int((await session.execute(query)).scalar() or 0)
+
+
+async def find_conversation_by_sender(
+    persona_id: str,
+    sender_id: str,
+) -> str | None:
+    """Most recent conversation a given sender has messaged the persona in.
+
+    Needed to route a proactive message to a contact whose contact id
+    (Instagram user id) differs from the conversation/thread id.
+    """
+    async with SessionFactory() as session:
+        result = await session.execute(
+            select(ConversationMessage.conversation_id)
+            .where(
+                ConversationMessage.persona_id == persona_id,
+                ConversationMessage.direction == "user",
+                ConversationMessage.sender_id == sender_id,
+            )
+            .order_by(ConversationMessage.created_at.desc(), ConversationMessage.id.desc())
+            .limit(1)
+        )
+        return result.scalars().first()
 
 
 async def list_contacts(persona_id: str | None = None) -> list[dict[str, Any]]:

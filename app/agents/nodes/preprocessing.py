@@ -76,6 +76,9 @@ def build_prompt_node(state: PersonaGraphState, persona: dict[str, Any]) -> dict
             "just messaged. Return only the message you would send."
         )
 
+    if confide_context := state.get("confide_context"):
+        system += "\n\nCONFIDING IN THIS PERSON\n" + confide_context
+
     roles = { "bot": "assistant", "user": "user" }
     history = [
         { "role": roles[message["direction"]], "content": message["content"] }

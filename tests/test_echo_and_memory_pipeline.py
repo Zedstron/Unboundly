@@ -1,8 +1,8 @@
-"""Regression tests for the echo bug and the memory-processing gap."""
+"""Regression tests for the echo bug, duplicate replies, and the memory-processing gap."""
 import pytest
 
 from app.domain.models import Decision
-from app.infrastructure.sqlite import init_db
+from app.infrastructure.sqlite import clear_persona_messages, init_db
 from app.services.conversation import ConversationService
 from app.services.bridges.models import SocialMessage
 from tests.test_contacts_and_trust import FakeRedis, dummy_persona
@@ -103,3 +103,51 @@ async def test_unknown_contact_gets_memory_task_no_reply(monkeypatch):
     keys = [k for k, _ in svc._recorded_schedules]
     assert "memory_pending" in keys
     assert "reply_pending" not in keys
+
+
+def _bridge_msg(external_id="wamid-1", text="hey there"):
+    return SocialMessage(
+        session="trust_test_persona",
+        message_id=external_id,
+        message_type="message",
+        chat_id="conv-dup",
+        item_id="i-1",
+        sender_id="conv-dup",
+        sender_name="Tester",
+        text=text,
+        provider="whatsapp",
+    )
+
+
+async def _classify(_text):
+    return "compliment"
+
+
+@pytest.mark.asyncio
+async def test_redelivered_bridge_message_is_ingested_once(monkeypatch):
+    """A bridge re-emitting the same provider message must not reply twice."""
+    await clear_persona_messages("trust_test_persona")
+    svc = _service(monkeypatch)
+    monkeypatch.setattr(svc.behavior, "decide", lambda state, ctx: Decision.REPLY_NOW)
+    monkeypatch.setattr(svc, "_classify_event", _classify)
+
+    await svc.ingest(_bridge_msg())
+    await svc.ingest(_bridge_msg())
+
+    replies = [p for k, p in svc._recorded_schedules if k == "reply_pending"]
+    assert len(replies) == 1
+
+
+@pytest.mark.asyncio
+async def test_unread_sweep_does_not_duplicate_queued_reply(monkeypatch):
+    """The live ingest path and the unread sweep must share one reply slot."""
+    await clear_persona_messages("trust_test_persona")
+    svc = _service(monkeypatch)
+    monkeypatch.setattr(svc.behavior, "decide", lambda state, ctx: Decision.REPLY_NOW)
+    monkeypatch.setattr(svc, "_classify_event", _classify)
+
+    await svc.ingest(_bridge_msg(external_id="wamid-2"))
+    await svc.process_unread_messages()
+
+    replies = [p for k, p in svc._recorded_schedules if k == "reply_pending"]
+    assert len(replies) == 1

@@ -7,6 +7,15 @@ from app.core.logger import get_logger
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.domain.mood import MoodEngine, MoodState
+from app.domain.awareness import (
+    PesterLevel,
+    annoyance_increment,
+    decay_annoyance,
+    evaluate_pestering,
+    is_at_least,
+    mood_event,
+    select_confidant,
+)
 from app.infrastructure.memory import ShortTermMemory
 from app.domain.models import AgentResponse, Decision
 from app.services.bridges.models import SocialMessage, Operation
@@ -30,6 +39,11 @@ from app.infrastructure.sqlite import (
     get_persona_state as get_persona_state_db,
     reset_persona_state as reset_persona_state_db,
     get_contact,
+    get_message_by_external_id,
+    count_unanswered_user_messages,
+    find_conversation_by_sender,
+    list_contacts,
+    update_contact_annoyance,
 )
 
 
@@ -132,23 +146,29 @@ class ConversationService:
     async def ingest(self, message: SocialMessage) -> dict:
         logger.info(f"[ConversationService.ingest] Starting ingestion: persona_id={self.persona['id']}, conversation_id={message.chat_id}, text_length={len(message.text)}")
         try:
+            # A bridge can deliver the same inbound message more than once
+            # (event re-emit, reconnect/history replay). Re-ingesting would
+            # store a duplicate row and queue a second reply, so the provider
+            # message id is the idempotency key here.
+            if message.provider != "local" and message.message_id:
+                existing = await get_message_by_external_id(
+                    message.provider,
+                    str(message.message_id),
+                    persona_id=self.persona["id"],
+                    direction="user",
+                )
+                if existing is not None:
+                    logger.info(
+                        "[ConversationService.ingest] Duplicate inbound message ignored: persona_id=%s, source=%s, external_id=%s, message_id=%s",
+                        self.persona["id"],
+                        message.provider,
+                        message.message_id,
+                        existing.id,
+                    )
+                    return { "message_id": existing.id }
+
             logger.debug(f"[ConversationService.ingest] Loading mood state for persona_id={self.persona['id']}")
             state = await self._load_state()
-
-            logger.debug(f"[ConversationService.ingest] Classifying event")
-            event = await self._classify_event(message.text)
-            logger.debug(f"[ConversationService.ingest] Event classified as: {event}")
-            
-            state = self.mood.update(state, event)
-            logger.debug(f"[ConversationService.ingest] Mood state updated: {state.values}")
-
-            self.states[message.chat_id] = state
-
-            await self._save_state(state)
-            logger.debug(f"[ConversationService.ingest] Mood state saved for persona_id={self.persona['id']}")
-
-            presence = await self.get_presence()
-            logger.debug(f"[ConversationService.ingest] Presence retrieved: online={presence.get('online') if presence else 'unknown'}")
 
             message_id = await save_message(
                 self.persona["id"],
@@ -166,9 +186,41 @@ class ConversationService:
 
             logger.debug(f"[ConversationService.ingest] User message saved: message_id={message_id}")
 
-            # Check contact existence
             contact_id = message.sender_id or message.chat_id
-            if await self._contact_is_unknown(message.chat_id, message.sender_id) and not settings.reply_unknown_contacts:
+            is_unknown = await self._contact_is_unknown(message.chat_id, message.sender_id)
+            pester_level = await self._record_and_assess_contact(contact_id, message.chat_id, is_unknown)
+
+            pester_event = mood_event(pester_level)
+            if pester_event is not None:
+                event = pester_event
+                logger.info(f"[ConversationService.ingest] Pestering detected: level={pester_level.value}, event={event}")
+            else:
+                logger.debug(f"[ConversationService.ingest] Classifying event")
+                event = await self._classify_event(message.text)
+
+            logger.debug(f"[ConversationService.ingest] Event classified as: {event}")
+
+            state = self.mood.update(state, event)
+            logger.debug(f"[ConversationService.ingest] Mood state updated: {state.values}")
+
+            self.states[message.chat_id] = state
+
+            await self._save_state(state)
+            logger.debug(f"[ConversationService.ingest] Mood state saved for persona_id={self.persona['id']}")
+
+            presence = await self.get_presence()
+            logger.debug(f"[ConversationService.ingest] Presence retrieved: online={presence.get('online') if presence else 'unknown'}")
+
+            # A pestering contact may prompt the persona to confide in someone
+            # it trusts, independently of whether it answers the sender.
+            await self._maybe_schedule_confide(
+                offender_id=contact_id,
+                level=pester_level,
+                sender_name=message.sender_name,
+            )
+
+            # Check contact existence
+            if is_unknown and not settings.reply_unknown_contacts:
                 logger.info(f"[ConversationService.ingest] Unknown contact ({contact_id}) and reply_unknown_contacts is disabled. Skipping reply.")
                 # Still remember it: memory/trust processing is how a stranger
                 # can eventually become a known contact.
@@ -205,27 +257,193 @@ class ConversationService:
                 due = time() + self._delay_seconds(state, message.text)
                 logger.info(f"[ConversationService.ingest] Decision: LATE_REPLY, scheduling for {due - time():.1f} seconds from now")
 
-                await self.short_memory.schedule(
-                    "reply_pending",
-                    self._reply_task_payload(message, message_id),
-                    due,
-                )
+                await self._schedule_reply(self._reply_task_payload(message, message_id), due)
                 logger.debug(f"[ConversationService.ingest] Scheduled reply_pending task: conversation_id={message.chat_id}")
 
                 return { "message_id": message_id }
 
             logger.info(f"[ConversationService.ingest] Decision: REPLY_NOW, scheduling immediate reply")
-            await self.short_memory.schedule(
-                "reply_pending",
-                self._reply_task_payload(message, message_id),
-                time(),
-            )
+            await self._schedule_reply(self._reply_task_payload(message, message_id), time())
             logger.debug(f"[ConversationService.ingest] Scheduled reply_pending task immediately: conversation_id={message.chat_id}")
 
             return { "message_id": message_id }
         except Exception as e:
             logger.error(f"[ConversationService.ingest] Error during ingest: {e}", exc_info=True)
             raise
+
+    async def _record_and_assess_contact(
+        self,
+        contact_id: str,
+        conversation_id: str,
+        is_unknown: bool,
+    ) -> PesterLevel:
+        """Record the inbound message and return how much it is pestering.
+
+        Runs only when the persona opted into ``social_awareness``; otherwise
+        ingestion is unchanged.
+        """
+        cfg = self.persona.get("social_awareness") or {}
+        if not cfg.get("enabled"):
+            return PesterLevel.NEUTRAL
+
+        persona_id = self.persona["id"]
+        await self.short_memory.record_contact_message(persona_id, contact_id)
+        activity = await self.short_memory.get_contact_activity(persona_id, contact_id)
+        unanswered = await count_unanswered_user_messages(persona_id, conversation_id)
+
+        level = evaluate_pestering(
+            activity,
+            unanswered,
+            is_unknown=is_unknown,
+            thresholds=cfg.get("thresholds"),
+        )
+
+        if level is not PesterLevel.NEUTRAL:
+            await self._bump_annoyance(contact_id, level, cfg)
+            logger.info(
+                "[ConversationService.ingest] Pester level=%s for contact_id=%s (activity=%s, unanswered=%s)",
+                level.value, contact_id, activity, unanswered,
+            )
+
+        return level
+
+    async def _bump_annoyance(self, contact_id: str, level: PesterLevel, cfg: dict) -> None:
+        """Decay then raise a contact's durable annoyance score."""
+        contact = await get_contact(self.persona["id"], contact_id)
+        if contact is None:
+            # The memory pipeline creates the row after ingest; the next
+            # message will carry the score.
+            return
+
+        updated_at = contact.get("updated_at")
+        hours = 0.0
+        if isinstance(updated_at, datetime):
+            if updated_at.tzinfo is None:
+                updated_at = updated_at.replace(tzinfo=timezone.utc)
+            hours = max(0.0, (datetime.now(timezone.utc) - updated_at).total_seconds() / 3600)
+
+        rate = float(cfg.get("annoyance_decay_per_hour", 0.08))
+        decayed = decay_annoyance(float(contact.get("annoyance", 0.0)), hours, rate)
+        await update_contact_annoyance(
+            self.persona["id"],
+            contact_id,
+            decayed + annoyance_increment(level),
+        )
+
+    async def _maybe_schedule_confide(
+        self,
+        offender_id: str,
+        level: PesterLevel,
+        sender_name: str | None = None,
+    ) -> bool:
+        """Queue one rate-limited vent about a pestering contact to a confidant.
+
+        The persona must be online and inside an active window, the confidant
+        must be a vetted high-trust contact, and per-pair/global/daily limits
+        must all pass. The message itself is generated later by the worker.
+        """
+        cfg = self.persona.get("social_awareness") or {}
+        if not cfg.get("enabled") or not is_at_least(level, PesterLevel.ANNOYED):
+            return False
+
+        persona_id = self.persona["id"]
+        contacts = await list_contacts(persona_id)
+        confidant = select_confidant(
+            contacts,
+            min_trust=float(cfg.get("min_confidant_trust", 0.72)),
+            exclude_id=offender_id,
+        )
+        if confidant is None:
+            return False
+
+        presence = await self.get_presence()
+        if not presence.get("online") or presence.get("busy"):
+            return False
+
+        windows = cfg.get("time_windows")
+        if windows:
+            local_hour = self._local_now().hour
+            if not any(
+                len(window) == 2 and int(window[0]) <= local_hour <= int(window[1])
+                for window in windows
+            ):
+                return False
+
+        confidant_id = str(confidant["contact_id"])
+        pair_cooldown = int(float(cfg.get("confide_cooldown_minutes", 720)) * 60)
+        if not await self.short_memory.claim_confide(persona_id, offender_id, confidant_id, pair_cooldown):
+            logger.debug("[ConversationService._maybe_schedule_confide] Pair cooldown active; skipping")
+            return False
+
+        global_cooldown = int(float(cfg.get("confide_global_cooldown_minutes", 240)) * 60)
+        if not await self.short_memory.claim_confide_global(persona_id, global_cooldown):
+            await self.short_memory.release_confide(persona_id, offender_id, confidant_id)
+            return False
+
+        daily_key = f"persona:confide:count:{persona_id}:{self._local_now().date().isoformat()}"
+        if not await self.short_memory.reserve_daily_follow_up(daily_key, int(cfg.get("daily_confide_budget", 2))):
+            await self.short_memory.release_confide(persona_id, offender_id, confidant_id)
+            return False
+
+        confidant_conversation = await find_conversation_by_sender(persona_id, confidant_id) or confidant_id
+        last_message = await get_last_user_message(persona_id, confidant_conversation)
+
+        payload = {
+            "conversation_id": confidant_conversation,
+            "persona_id": persona_id,
+            "trigger": "venting",
+            "offender_id": offender_id,
+            "pester_level": level.value,
+            "confide_context": self._confide_context(level, sender_name, cfg),
+        }
+        if last_message:
+            if last_message.get("source"):
+                payload["source"] = last_message["source"]
+            if last_message.get("sender_id"):
+                payload["sender_id"] = last_message["sender_id"]
+            if last_message.get("sender_name"):
+                payload["sender_name"] = last_message["sender_name"]
+
+        delay = float(cfg.get("confide_delay_seconds", 90))
+        await self.short_memory.schedule("confide", payload, time() + delay)
+        logger.info(
+            "[ConversationService._maybe_schedule_confide] Scheduled venting about offender=%s to confidant=%s (level=%s)",
+            offender_id, confidant_id, level.value,
+        )
+        return True
+
+    @staticmethod
+    def _confide_context(level: PesterLevel, sender_name: str | None, cfg: dict) -> str:
+        share = bool(cfg.get("share_contact_identity", False))
+        who = f"someone saved as {sender_name}" if (share and sender_name) else "an unsaved contact"
+        return (
+            f"You decided, entirely on your own, to confide in this trusted contact. "
+            f"{who} keeps messaging you and it is getting on your nerves "
+            f"(intensity: {level.value}). Talk about it the way you naturally would "
+            f"with this person: short, real, a little vulnerable. Do not expose "
+            f"private details such as phone numbers, usernames, or screenshots, and "
+            f"do not turn it into a formal report."
+        )
+
+    async def _schedule_reply(self, payload: dict, due_at: float) -> bool:
+        """Queue a reply for an inbound message at most once.
+
+        ``ingest`` and ``process_unread_messages`` can both try to answer the
+        same stored message; the per-message claim makes the first one win so
+        the persona never sends two replies for one message.
+        """
+        user_message_id = payload.get("user_message_id")
+        if user_message_id is not None and not await self.short_memory.claim_reply(
+            self.persona["id"], int(user_message_id)
+        ):
+            logger.info(
+                "[ConversationService._schedule_reply] Reply already queued for message_id=%s; skipping duplicate",
+                user_message_id,
+            )
+            return False
+
+        await self.short_memory.schedule("reply_pending", payload, due_at)
+        return True
 
     @staticmethod
     def _reply_task_payload(message: SocialMessage, message_id: int) -> dict:
@@ -328,6 +546,7 @@ class ConversationService:
         text: str | None = None,
         reply_to_message_id: str | None = None,
         reply_to_text: str | None = None,
+        confide_context: str | None = None,
     ) -> AgentResponse:
         logger.info(f"[ConversationService.generate_reply] Generating reply for conversation_id={conversation_id}, persona_id={self.persona['id']}")
         try:
@@ -354,6 +573,7 @@ class ConversationService:
                     text=text,
                     reply_to_message_id=reply_to_message_id,
                     reply_to_text=reply_to_text,
+                    confide_context=confide_context,
                 )
                 elapsed = time_module.time() - start
 
@@ -625,8 +845,7 @@ class ConversationService:
                     delay = self._delay_seconds(state, action["content"])
                     logger.info(f"[ConversationService.process_unread_messages] Scheduling LATE_REPLY: conversation_id={action['conversation_id']}, delay_seconds={delay:.1f}")
 
-                    await self.short_memory.schedule(
-                        "reply_pending",
+                    await self._schedule_reply(
                         {
                             "conversation_id": action["conversation_id"],
                             "persona_id": self.persona["id"],
@@ -642,8 +861,7 @@ class ConversationService:
                     )
                 elif action["decision"] == Decision.REPLY_NOW.value:
                     logger.info(f"[ConversationService.process_unread_messages] Scheduling immediate reply: conversation_id={action['conversation_id']}")
-                    await self.short_memory.schedule(
-                        "reply_pending",
+                    await self._schedule_reply(
                         {
                             "conversation_id": action["conversation_id"],
                             "persona_id": self.persona["id"],

@@ -142,6 +142,65 @@ class ShortTermMemory:
 
         return due_items
 
+    async def record_contact_message(
+        self,
+        persona_id: str,
+        contact_id: str,
+        now: float | None = None,
+        retention: int = 24 * 60 * 60,
+    ) -> None:
+        """Record one inbound message for the contact's rolling activity window."""
+        now = now or time.time()
+        key = f"persona:activity:{persona_id}:{contact_id}"
+        member = f"{now:.6f}:{uuid.uuid4().hex}"
+        await self.redis.zadd(key, {member: now})
+        await self.redis.zremrangebyscore(key, 0, now - retention)
+        await self.redis.expire(key, retention * 2)
+
+    async def get_contact_activity(self, persona_id: str, contact_id: str) -> dict[str, int]:
+        """Rolling inbound-message counts used by pester detection."""
+        now = time.time()
+        key = f"persona:activity:{persona_id}:{contact_id}"
+
+        async def count(seconds: int) -> int:
+            return int(await self.redis.zcount(key, now - seconds, now))
+
+        return {
+            "burst_2m": await count(2 * 60),
+            "sustained_10m": await count(10 * 60),
+            "hourly": await count(60 * 60),
+            "daily": await count(24 * 60 * 60),
+        }
+
+    async def claim_confide(
+        self,
+        persona_id: str,
+        offender_id: str,
+        confidant_id: str,
+        ttl: int,
+    ) -> bool:
+        """Reserve the single vent slot for one (offender, confidant) pair."""
+        key = f"persona:confide:{persona_id}:{offender_id}:{confidant_id}"
+        return bool(await self.redis.set(key, "1", ex=ttl, nx=True))
+
+    async def claim_confide_global(self, persona_id: str, ttl: int) -> bool:
+        """Persona-wide cooldown so it never becomes a serial complainer."""
+        key = f"persona:confide:global:{persona_id}"
+        return bool(await self.redis.set(key, "1", ex=ttl, nx=True))
+
+    async def release_confide(self, persona_id: str, offender_id: str, confidant_id: str) -> None:
+        await self.redis.delete(f"persona:confide:{persona_id}:{offender_id}:{confidant_id}")
+
+    async def claim_reply(self, persona_id: str, user_message_id: int, ttl: int = 24 * 60 * 60) -> bool:
+        """Reserve the single reply slot for an inbound message.
+
+        Both the live ingestion path and the unread-message sweep can decide
+        to reply to the same stored message. Without this claim they each
+        enqueue a ``reply_pending`` task and the persona answers twice.
+        """
+        key = f"persona:reply:queued:{persona_id}:{user_message_id}"
+        return bool(await self.redis.set(key, "1", ex=ttl, nx=True))
+
     async def claim_follow_up(self, persona_id: str, conversation_id: str, ttl: int) -> bool:
         key = f"persona:follow-up:pending:{persona_id}:{conversation_id}"
         return bool(await self.redis.set(key, "1", ex=ttl, nx=True))
