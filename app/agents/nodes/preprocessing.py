@@ -18,6 +18,23 @@ def _reply_context(state: PersonaGraphState) -> str:
     )
 
 
+def _commitments_context(state: PersonaGraphState) -> str:
+    """Render the promises the persona still owes this conversation."""
+    commitments = state.get("open_commitments") or []
+    if not commitments:
+        return "(none — you have not promised to get back to this person)"
+
+    lines = []
+    for commitment in commitments:
+        window = str(commitment.get("window", "")).replace("_", " ").strip()
+        topic = (commitment.get("topic") or "").strip()
+        line = f"- you said you would reach out ({window or 'later'})"
+        if topic:
+            line += f" about {topic}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
 def build_prompt_node(state: PersonaGraphState, persona: dict[str, Any]) -> dict[str, list[dict[str, str]]]:
     tools_block = ""
     if mcp_registry.has_tools:
@@ -66,6 +83,7 @@ def build_prompt_node(state: PersonaGraphState, persona: dict[str, Any]) -> dict
             "long_memories": state["long_memories"],
             "language_style": persona.get("profile", {}).get("language_style", []),
             "tools_block": tools_block,
+            "open_commitments": _commitments_context(state),
         },
     )
 
@@ -78,6 +96,9 @@ def build_prompt_node(state: PersonaGraphState, persona: dict[str, Any]) -> dict
 
     if confide_context := state.get("confide_context"):
         system += "\n\nCONFIDING IN THIS PERSON\n" + confide_context
+
+    if commitment_context := state.get("commitment_context"):
+        system += "\n\nFOLLOWING THROUGH ON A PROMISE\n" + commitment_context
 
     roles = { "bot": "assistant", "user": "user" }
     history = [

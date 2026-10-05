@@ -38,7 +38,17 @@ def parse_agent_response(content: str) -> AgentResponse:
             payload = None
 
         if isinstance(payload, dict):
-            return AgentResponse.model_validate(payload)
+            try:
+                return AgentResponse.model_validate(payload)
+            except Exception:
+                # A malformed "commitment" must not sink an otherwise valid
+                # reply: drop it and validate the message itself. The promise
+                # is then simply not scheduled (the persona's words stand, but
+                # no follow-up is queued).
+                if "commitment" in payload:
+                    payload = {k: v for k, v in payload.items() if k != "commitment"}
+                    return AgentResponse.model_validate(payload)
+                raise
 
     return AgentResponse(type="text", text=content)
 

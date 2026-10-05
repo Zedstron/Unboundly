@@ -108,9 +108,15 @@ async def test_decide_memories_node_initiative_overrides_exchange():
 
 
 def test_agent_response_is_reply_only():
-    # The message agent output must not carry memories or trust anymore.
+    # The message agent output must not carry memories or trust anymore; it may
+    # carry a commitment (a promise to get back in touch), null by default.
     response = AgentResponse(type="text", text="hi")
-    assert response.model_dump() == {"type": "text", "text": "hi", "reaction": None}
+    assert response.model_dump() == {
+        "type": "text",
+        "text": "hi",
+        "reaction": None,
+        "commitment": None,
+    }
 
     with pytest.raises(Exception):
         AgentResponse(type="text", text="")  # empty replies are invalid

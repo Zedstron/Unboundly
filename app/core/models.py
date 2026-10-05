@@ -72,3 +72,46 @@ class Contact(Base):
 
 Index("ix_contacts_persona_contact", "persona_id", "contact_id", unique=True)
 
+
+class CommitmentRow(Base):
+    """Durable record of a promise the persona made to get back in touch.
+
+    Redis carries the fast schedule, but a promise must survive a Redis
+    restart/eviction, so the database is the source of truth: the worker
+    atomically claims due rows, delivers, then settles them. ``status`` moves
+    pending -> sending -> fulfilled | expired | cancelled.
+    """
+
+    __tablename__ = "commitments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    persona_id: Mapped[str] = mapped_column(String(50), index=True, nullable=False)
+    conversation_id: Mapped[str] = mapped_column(String(100), index=True, nullable=False)
+    kind: Mapped[str] = mapped_column(String(30), nullable=False, default="follow_up")
+    window: Mapped[str] = mapped_column(String(30), nullable=False)
+    topic: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Transport routing metadata, resolved from the conversation at schedule
+    # time so an autonomous follow-up goes back out the same bridge it came in
+    # on (WhatsApp, Instagram, ...) rather than only the local inbox.
+    source: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    sender_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    sender_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+
+
+Index("ix_commitments_persona_status", "persona_id", "status")
+

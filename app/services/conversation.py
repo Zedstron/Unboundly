@@ -17,7 +17,8 @@ from app.domain.awareness import (
     select_confidant,
 )
 from app.infrastructure.memory import ShortTermMemory
-from app.domain.models import AgentResponse, Decision
+from app.domain.models import AgentResponse, Commitment, Decision
+from app.domain.scheduling import defer_within_window, resolve_schedule
 from app.services.bridges.models import SocialMessage, Operation
 from app.domain.behavior import BehaviorContext, BehaviorEngine
 from app.agents.persona_graph import PersonaAgentGraph
@@ -44,6 +45,13 @@ from app.infrastructure.sqlite import (
     find_conversation_by_sender,
     list_contacts,
     update_contact_annoyance,
+    cancel_open_commitments,
+    claim_due_commitments,
+    get_commitment,
+    recover_stale_commitments,
+    reschedule_commitment,
+    save_commitment,
+    settle_commitment as settle_commitment_db,
 )
 
 
@@ -253,6 +261,11 @@ class ConversationService:
                 )
                 return { "message_id": message_id }
 
+            # The persona is answering this conversation now, so any standing
+            # promise to get back to it is already being kept. Cancel it so it
+            # cannot fire later as a duplicate.
+            await self._cancel_commitments(message.chat_id)
+
             if decision is Decision.LATE_REPLY:
                 due = time() + self._delay_seconds(state, message.text)
                 logger.info(f"[ConversationService.ingest] Decision: LATE_REPLY, scheduling for {due - time():.1f} seconds from now")
@@ -445,6 +458,192 @@ class ConversationService:
         await self.short_memory.schedule("reply_pending", payload, due_at)
         return True
 
+    async def schedule_commitment(
+        self,
+        conversation_id: str,
+        commitment: Commitment,
+        *,
+        source: str | None = None,
+        sender_id: str | None = None,
+        sender_name: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Persist a promise the persona just made and resolve it to an instant.
+
+        The named window is turned into a concrete local time, biased toward
+        the hours this persona is actually online, then stored durably. A new
+        promise supersedes any standing one for the same conversation.
+        """
+        persona_id = self.persona["id"]
+        try:
+            state = self.current_state or await self._load_state()
+            now_local = self._local_now()
+            schedule = resolve_schedule(
+                commitment.window,
+                now_local=now_local,
+                online_probability=lambda hour: self.behavior.online_probability(hour, state),
+                rng=random.Random(),
+            )
+        except Exception as exc:
+            logger.warning(
+                "[ConversationService.schedule_commitment] Could not resolve window %r: %s",
+                commitment.window, exc,
+            )
+            return None
+
+        await self._cancel_commitments(conversation_id)
+
+        try:
+            record = await save_commitment(
+                persona_id,
+                conversation_id,
+                kind=commitment.kind.value,
+                window=commitment.window,
+                topic=(commitment.topic or None),
+                due_at=schedule.due_at.astimezone(timezone.utc),
+                window_end=schedule.window_end.astimezone(timezone.utc),
+                source=source,
+                sender_id=sender_id,
+                sender_name=sender_name,
+            )
+        except Exception:
+            logger.exception("[ConversationService.schedule_commitment] Failed to persist commitment")
+            return None
+
+        logger.info(
+            "[ConversationService.schedule_commitment] Commitment #%s scheduled: conversation_id=%s window=%s due_at=%s",
+            record["id"], conversation_id, commitment.window, schedule.due_at.isoformat(),
+        )
+        return record
+
+    async def _cancel_commitments(self, conversation_id: str) -> int:
+        try:
+            return await cancel_open_commitments(self.persona["id"], conversation_id)
+        except Exception:
+            logger.exception(
+                "[ConversationService._cancel_commitments] Failed for conversation_id=%s",
+                conversation_id,
+            )
+            return 0
+
+    async def process_due_commitments(self, limit: int = 10) -> int:
+        """Claim due promises and deliver, defer, or expire each one.
+
+        Runs from the life cycle rather than a fixed cron so timing follows the
+        persona's own rhythm. Delivery reuses the normal reply pipeline via a
+        ``commitment_reply`` task; here we only gate on presence and decide
+        whether the moment is still right.
+        """
+        persona_id = self.persona["id"]
+        now_utc = datetime.now(timezone.utc)
+
+        # A worker that died mid-delivery leaves a row in ``sending``; requeue
+        # it so a promise is not silently lost (at-least-once).
+        try:
+            await recover_stale_commitments(persona_id, now_utc - timedelta(seconds=120))
+        except Exception:
+            logger.exception("[ConversationService.process_due_commitments] Stale recovery failed")
+
+        try:
+            due = await claim_due_commitments(persona_id, now_utc, limit=limit)
+        except Exception:
+            logger.exception("[ConversationService.process_due_commitments] Claim failed")
+            return 0
+
+        if not due:
+            return 0
+
+        presence = await self.get_presence()
+        available = bool(presence.get("online")) and not bool(presence.get("busy"))
+        local_now = self._local_now()
+        scheduled = 0
+
+        for record in due:
+            if available:
+                await self.short_memory.schedule(
+                    "commitment_reply",
+                    self._commitment_task_payload(record),
+                    time(),
+                )
+                scheduled += 1
+                logger.info(
+                    "[ConversationService.process_due_commitments] Queued follow-up #%s for conversation_id=%s",
+                    record["id"], record["conversation_id"],
+                )
+                continue
+
+            # Offline or busy: keep the promise inside its window if there is
+            # still time, otherwise let it expire rather than texting at 4am.
+            if local_now < record["window_end"] and record["attempts"] < 3:
+                next_due = defer_within_window(local_now, record["window_end"], rng=random.Random())
+                await reschedule_commitment(record["id"], next_due.astimezone(timezone.utc))
+                logger.info(
+                    "[ConversationService.process_due_commitments] Deferred follow-up #%s to %s",
+                    record["id"], next_due.isoformat(),
+                )
+            else:
+                await settle_commitment_db(record["id"], "expired")
+                logger.info(
+                    "[ConversationService.process_due_commitments] Expired follow-up #%s (window passed)",
+                    record["id"],
+                )
+
+        return scheduled
+
+    async def settle_commitment(self, commitment_id: int, delivered: bool) -> None:
+        """Close out a delivered promise, or requeue/expire a failed delivery."""
+        try:
+            if delivered:
+                await settle_commitment_db(commitment_id, "fulfilled")
+                return
+
+            record = await get_commitment(commitment_id)
+            if record is None:
+                return
+
+            local_now = self._local_now()
+            if local_now < record["window_end"]:
+                next_due = defer_within_window(local_now, record["window_end"], rng=random.Random())
+                await reschedule_commitment(commitment_id, next_due.astimezone(timezone.utc))
+                logger.info(
+                    "[ConversationService.settle_commitment] Requeued #%s after failed delivery to %s",
+                    commitment_id, next_due.isoformat(),
+                )
+            else:
+                await settle_commitment_db(commitment_id, "expired")
+                logger.info(
+                    "[ConversationService.settle_commitment] Expired #%s after failed delivery",
+                    commitment_id,
+                )
+        except Exception:
+            logger.exception(
+                "[ConversationService.settle_commitment] Failed for commitment_id=%s",
+                commitment_id,
+            )
+
+    @staticmethod
+    def _commitment_task_payload(record: dict[str, Any]) -> dict[str, Any]:
+        window = str(record.get("window", "")).replace("_", " ").strip()
+        topic = (record.get("topic") or "").strip()
+        context = (
+            f"You promised this person you would reach out ({window or 'later'}). "
+            "This is that moment. Follow through naturally, keeping it short and in "
+            "your own voice. Do not mention scheduling, reminders, or that this was "
+            "queued; do not apologize for the delay unless it is genuinely late."
+        )
+        if topic:
+            context += f" What it was about: {topic}."
+
+        return {
+            "conversation_id": record["conversation_id"],
+            "persona_id": record["persona_id"],
+            "trigger": "follow_up",
+            "commitment_id": record["id"],
+            "commitment_context": context,
+            "source": record.get("source"),
+            "sender_id": record.get("sender_id"),
+            "sender_name": record.get("sender_name"),
+        }
+
     @staticmethod
     def _reply_task_payload(message: SocialMessage, message_id: int) -> dict:
         """Reply task routing info ONLY.
@@ -547,6 +746,7 @@ class ConversationService:
         reply_to_message_id: str | None = None,
         reply_to_text: str | None = None,
         confide_context: str | None = None,
+        commitment_context: str | None = None,
     ) -> AgentResponse:
         logger.info(f"[ConversationService.generate_reply] Generating reply for conversation_id={conversation_id}, persona_id={self.persona['id']}")
         try:
@@ -574,6 +774,7 @@ class ConversationService:
                     reply_to_message_id=reply_to_message_id,
                     reply_to_text=reply_to_text,
                     confide_context=confide_context,
+                    commitment_context=commitment_context,
                 )
                 elapsed = time_module.time() - start
 
@@ -841,6 +1042,9 @@ class ConversationService:
 
             logger.debug(f"[ConversationService.process_unread_messages] Processing {len(actions)} actions")
             for action in actions:
+                if action["decision"] != Decision.NO_REPLY.value:
+                    # Answering this conversation now supersedes any standing promise.
+                    await self._cancel_commitments(action["conversation_id"])
                 if action["decision"] == Decision.LATE_REPLY.value:
                     delay = self._delay_seconds(state, action["content"])
                     logger.info(f"[ConversationService.process_unread_messages] Scheduling LATE_REPLY: conversation_id={action['conversation_id']}, delay_seconds={delay:.1f}")

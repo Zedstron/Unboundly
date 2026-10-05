@@ -71,6 +71,7 @@ class PersonaAgentGraph:
         reply_to_message_id: str | None = None,
         reply_to_text: str | None = None,
         confide_context: str | None = None,
+        commitment_context: str | None = None,
     ) -> AgentResponse:
         result = await self.graph.ainvoke(
             {
@@ -85,6 +86,7 @@ class PersonaAgentGraph:
                 "reply_to_message_id": reply_to_message_id,
                 "reply_to_text": reply_to_text,
                 "confide_context": confide_context,
+                "commitment_context": commitment_context,
             }
         )
         return result["agent_response"]

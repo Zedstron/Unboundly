@@ -123,6 +123,15 @@ async def worker_task(redis: Redis) -> None:
                             if scheduled:
                                 logger.info("[worker_task/life_tick] Scheduled %s self follow-up(s) for persona_id=%s", scheduled, persona_id)
 
+                            # Promises the persona made ("I'll message you tonight")
+                            # are claimed and delivered according to its own rhythm.
+                            try:
+                                due_commitments = await conversation_service.process_due_commitments()
+                                if due_commitments:
+                                    logger.info("[worker_task/life_tick] Queued %s due commitment(s) for persona_id=%s", due_commitments, persona_id)
+                            except Exception:
+                                logger.exception("[worker_task/life_tick] Commitment processing failed for persona_id=%s", persona_id)
+
                         except Exception as e:
                             logger.error(f"[worker_task/life_tick] Error processing life_tick for persona_id={persona_id}: {e}", exc_info=True)
 
@@ -149,6 +158,18 @@ async def worker_task(redis: Redis) -> None:
                         persona_id = payload["persona_id"]
                         conversation_id = payload["conversation_id"]
                         source = payload.get("source")
+                        commitment_id = payload.get("commitment_id")
+
+                        if item_key == "commitment_reply":
+                            # Fire-time presence gate: only keep a promise when the
+                            # persona is actually available; otherwise requeue it
+                            # inside its window or let it expire.
+                            presence = await conversation_service.get_presence()
+                            if not presence.get("online") or presence.get("busy"):
+                                if commitment_id:
+                                    await conversation_service.settle_commitment(int(commitment_id), False)
+                                logger.info("[worker_task/commitment] Persona unavailable; deferred follow-up id=%s", commitment_id)
+                                continue
 
                         if "memory" in item_key:
                             # Memory-only task: store what the user said without replying.
@@ -189,6 +210,7 @@ async def worker_task(redis: Redis) -> None:
                                 reply_to_message_id=payload.get("reply_to_message_id"),
                                 reply_to_text=payload.get("reply_to_text"),
                                 confide_context=payload.get("confide_context"),
+                                commitment_context=payload.get("commitment_context"),
                             )
                             elapsed = time.time() - start_time
                             logger.info(f"[worker_task/reply] Response generated fresh in {elapsed:.2f}s: conversation_id={conversation_id}, type={response.type}, text_length={len(response.text or '')}")
@@ -196,6 +218,8 @@ async def worker_task(redis: Redis) -> None:
                             logger.error(f"[worker_task/reply] Error generating reply for conversation_id={conversation_id}: {e}", exc_info=True)
                             # Never send a canned fallback: if generation fails,
                             # abort the task instead of risking an echo.
+                            if commitment_id:
+                                await conversation_service.settle_commitment(int(commitment_id), False)
                             continue
 
                         # Resolve the provider message id to quote for a reply.
@@ -302,6 +326,21 @@ async def worker_task(redis: Redis) -> None:
                                 "reply_to_message_id": quoted_message_id,
                             }))
                             logger.debug(f"[worker_task/reply] Bot message published: conversation_id={conversation_id}")
+
+                        # The promise (if this was one) was kept.
+                        if commitment_id:
+                            await conversation_service.settle_commitment(int(commitment_id), True)
+
+                        # The reply may itself contain a new promise; record it so
+                        # the persona follows through on what it just said.
+                        if response.commitment is not None:
+                            await conversation_service.schedule_commitment(
+                                conversation_id,
+                                response.commitment,
+                                source=source,
+                                sender_id=payload.get("sender_id"),
+                                sender_name=payload.get("sender_name"),
+                            )
 
 
                     except Exception as e:

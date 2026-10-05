@@ -4,13 +4,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import (
     AsyncSession,
     async_sessionmaker,
     create_async_engine,
 )
-from app.core.models import ConversationMessage, PersonaState, Contact, Base
+from app.core.models import CommitmentRow, ConversationMessage, PersonaState, Contact, Base
 
 
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -827,4 +827,245 @@ async def delete_contact(persona_id: str, contact_id: str) -> bool:
         )
         await session.commit()
         return result.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Commitments: durable promises the persona made to get back in touch.
+# ---------------------------------------------------------------------------
+
+
+def _as_utc(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _commitment_row_dict(row: CommitmentRow) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "persona_id": row.persona_id,
+        "conversation_id": row.conversation_id,
+        "kind": row.kind,
+        "window": row.window,
+        "topic": row.topic,
+        "status": row.status,
+        "due_at": _as_utc(row.due_at),
+        "window_end": _as_utc(row.window_end),
+        "attempts": int(row.attempts or 0),
+        "source": row.source,
+        "sender_id": row.sender_id,
+        "sender_name": row.sender_name,
+        "created_at": _as_utc(row.created_at),
+        "updated_at": _as_utc(row.updated_at),
+    }
+
+
+async def save_commitment(
+    persona_id: str,
+    conversation_id: str,
+    *,
+    kind: str,
+    window: str,
+    topic: str | None,
+    due_at: datetime,
+    window_end: datetime,
+    source: str | None = None,
+    sender_id: str | None = None,
+    sender_name: str | None = None,
+) -> dict[str, Any]:
+    """Persist a newly promised follow-up."""
+    now = datetime.now(timezone.utc)
+    async with SessionFactory() as session:
+        row = CommitmentRow(
+            persona_id=persona_id,
+            conversation_id=conversation_id,
+            kind=kind,
+            window=window,
+            topic=topic,
+            status="pending",
+            due_at=_as_utc(due_at),
+            window_end=_as_utc(window_end),
+            attempts=0,
+            source=source,
+            sender_id=sender_id,
+            sender_name=sender_name,
+            created_at=now,
+            updated_at=now,
+        )
+        session.add(row)
+        await session.commit()
+        await session.refresh(row)
+        return _commitment_row_dict(row)
+
+
+async def get_commitment(commitment_id: int) -> dict[str, Any] | None:
+    async with SessionFactory() as session:
+        result = await session.execute(
+            select(CommitmentRow).where(CommitmentRow.id == commitment_id).limit(1)
+        )
+        row = result.scalars().first()
+        return _commitment_row_dict(row) if row is not None else None
+
+
+async def list_open_commitments(
+    persona_id: str,
+    conversation_id: str | None = None,
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Promises still standing, soonest first — the persona's own to-do list.
+
+    Used to feed generation so the persona does not contradict a promise it
+    has already made.
+    """
+    async with SessionFactory() as session:
+        query = select(CommitmentRow).where(
+            CommitmentRow.persona_id == persona_id,
+            CommitmentRow.status.in_(("pending", "sending")),
+        )
+        if conversation_id is not None:
+            query = query.where(CommitmentRow.conversation_id == conversation_id)
+        query = query.order_by(CommitmentRow.due_at.asc()).limit(limit)
+        rows = (await session.execute(query)).scalars().all()
+        return [_commitment_row_dict(row) for row in rows]
+
+
+async def claim_due_commitments(
+    persona_id: str,
+    now: datetime | None = None,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """Atomically take ownership of due promises for one persona.
+
+    The guarded ``UPDATE ... WHERE status='pending'`` makes the claim safe
+    across concurrent workers: only one caller flips a row to ``sending``.
+    """
+    now = _as_utc(now) or datetime.now(timezone.utc)
+    claimed: list[dict[str, Any]] = []
+    async with SessionFactory() as session:
+        rows = (
+            await session.execute(
+                select(CommitmentRow)
+                .where(
+                    CommitmentRow.persona_id == persona_id,
+                    CommitmentRow.status == "pending",
+                    CommitmentRow.due_at <= now,
+                )
+                .order_by(CommitmentRow.due_at.asc())
+                .limit(limit)
+            )
+        ).scalars().all()
+
+        for row in rows:
+            result = await session.execute(
+                update(CommitmentRow)
+                .where(
+                    CommitmentRow.id == row.id,
+                    CommitmentRow.status == "pending",
+                )
+                .values(
+                    status="sending",
+                    attempts=CommitmentRow.attempts + 1,
+                    updated_at=now,
+                )
+            )
+            if result.rowcount:
+                fresh = (await session.execute(
+                    select(CommitmentRow).where(CommitmentRow.id == row.id)
+                )).scalars().first()
+                if fresh is not None:
+                    claimed.append(_commitment_row_dict(fresh))
+
+        await session.commit()
+    return claimed
+
+
+async def reschedule_commitment(commitment_id: int, due_at: datetime) -> bool:
+    """Return a claimed promise to the queue at a later instant within its window."""
+    now = datetime.now(timezone.utc)
+    async with SessionFactory() as session:
+        result = await session.execute(
+            update(CommitmentRow)
+            .where(
+                CommitmentRow.id == commitment_id,
+                CommitmentRow.status.in_(("pending", "sending")),
+            )
+            .values(status="pending", due_at=_as_utc(due_at), updated_at=now)
+        )
+        await session.commit()
+        return result.rowcount > 0
+
+
+async def settle_commitment(commitment_id: int, status: str) -> bool:
+    """Finalize a commitment (``fulfilled``, ``expired`` or ``cancelled``)."""
+    if status not in ("fulfilled", "expired", "cancelled"):
+        raise ValueError(f"invalid commitment status: {status}")
+    now = datetime.now(timezone.utc)
+    async with SessionFactory() as session:
+        result = await session.execute(
+            update(CommitmentRow)
+            .where(
+                CommitmentRow.id == commitment_id,
+                CommitmentRow.status.in_(("pending", "sending")),
+            )
+            .values(status=status, updated_at=now)
+        )
+        await session.commit()
+        return result.rowcount > 0
+
+
+async def cancel_open_commitments(persona_id: str, conversation_id: str) -> int:
+    """Cancel standing promises for a conversation (persona answered first)."""
+    now = datetime.now(timezone.utc)
+    async with SessionFactory() as session:
+        result = await session.execute(
+            update(CommitmentRow)
+            .where(
+                CommitmentRow.persona_id == persona_id,
+                CommitmentRow.conversation_id == conversation_id,
+                CommitmentRow.status.in_(("pending", "sending")),
+            )
+            .values(status="cancelled", updated_at=now)
+        )
+        await session.commit()
+        return int(result.rowcount or 0)
+
+
+async def clear_persona_commitments(
+    persona_id: str,
+    conversation_id: str | None = None,
+) -> int:
+    """Delete a persona's commitment rows (optionally one conversation)."""
+    async with SessionFactory() as session:
+        query = delete(CommitmentRow).where(CommitmentRow.persona_id == persona_id)
+        if conversation_id is not None:
+            query = query.where(CommitmentRow.conversation_id == conversation_id)
+        result = await session.execute(query)
+        await session.commit()
+        return int(result.rowcount or 0)
+
+
+async def recover_stale_commitments(
+    persona_id: str,
+    stale_before: datetime,
+) -> int:
+    """Re-queue commitments stuck in ``sending`` (worker crashed mid-delivery).
+
+    Gives at-least-once delivery for promises; a rare duplicate follow-up is
+    preferable to a promise silently never being kept.
+    """
+    now = datetime.now(timezone.utc)
+    async with SessionFactory() as session:
+        result = await session.execute(
+            update(CommitmentRow)
+            .where(
+                CommitmentRow.persona_id == persona_id,
+                CommitmentRow.status == "sending",
+                CommitmentRow.updated_at <= _as_utc(stale_before),
+            )
+            .values(status="pending", updated_at=now)
+        )
+        await session.commit()
+        return int(result.rowcount or 0)
 

@@ -33,6 +33,50 @@ MessageType = Literal[
 
 UNIMPLEMENTED_MESSAGE_TYPES: frozenset[str] = frozenset({"voice", "image"})
 
+# A spoken time promise, not a timestamp. "this evening" is resolved against
+# the persona's own availability curve at scheduling time; the model is only
+# allowed to choose from these buckets.
+CommitmentWindow = Literal[
+    "in_a_bit",
+    "later_today",
+    "this_evening",
+    "tonight",
+    "tomorrow_morning",
+    "tomorrow_evening",
+    "this_week",
+]
+
+
+class CommitmentKind(StrEnum):
+    # Persona promised to reach out on its own ("I'll text you tonight").
+    FOLLOW_UP = "follow_up"
+    # Persona owes an answer it deferred ("can't talk now, I'll reply later").
+    DEFERRED_REPLY = "deferred_reply"
+
+
+class Commitment(BaseModel):
+    """A time the persona explicitly promised to get back in touch.
+
+    Emitted in the same JSON envelope as the reply text so the words and the
+    schedule are validated together: if the persona says it will reach out
+    later, this is what actually makes that happen.
+    """
+
+    kind: CommitmentKind = Field(
+        default=CommitmentKind.FOLLOW_UP,
+        description="Whether the persona initiated the promise or is deferring an answer.",
+    )
+    window: CommitmentWindow = Field(
+        ...,
+        description="When the persona said it would get back, as a named window.",
+    )
+    topic: str | None = Field(
+        default=None,
+        max_length=200,
+        description="Short reminder of what the follow-up is about, if useful.",
+    )
+
+
 class Decision(StrEnum):
     NO_REPLY = "no_reply"
     LATE_REPLY = "reply_scheduled"
@@ -102,6 +146,13 @@ class AgentResponse(BaseModel):
     reaction: str | None = Field(
         default=None,
         description="A single emoji. Required for type=reaction; unused otherwise.",
+    )
+    commitment: Commitment | None = Field(
+        default=None,
+        description=(
+            "Set only when this message promises to get back in touch later. "
+            "Must accompany any statement of a future time."
+        ),
     )
 
     @model_validator(mode="after")

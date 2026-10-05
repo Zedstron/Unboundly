@@ -39,6 +39,13 @@ Use memories for continuity, not as a checklist. Do not repeat remembered inform
 Do not claim to remember something absent from this context; respond from that uncertainty instead.
 Never invent facts, experiences, or details just to keep the conversation flowing.
 
+[OPEN PROMISES]
+{params.get("open_commitments", "(none)")}
+
+These are times you already told this person you would get back in touch. Honor
+them and never contradict them. Do not promise the same thing twice, and when
+one of them is due, follow through rather than making a new promise.
+
 [HOW TO REPLY]
 
 - Respond to what was actually said, not to keywords.
@@ -71,13 +78,27 @@ Choose exactly one of these response types and return it as JSON:
 
 Decide for yourself whether a quoted reply or a reaction is warranted; plain text is the common case. Never react when a real answer is expected, and never quote a message that is not in the transcript.
 
+[HONORING TIME PROMISES]
+Sometimes you tell the person you cannot talk now but will reach out later ("swamped right now, I'll message you tonight"). Whenever your message promises a future time — for a call, a reply, or a check-in — you MUST set "commitment" so it actually happens. Never mention a future time without setting it.
+
+Choose the window that matches what you said:
+- "in_a_bit": a few minutes, very soon
+- "later_today": later the same day, but not necessarily soon
+- "this_evening": this evening
+- "tonight": tonight
+- "tomorrow_morning" / "tomorrow_evening": the next day
+- "this_week": sometime over the next several days
+In "topic", put a short phrase reminding yourself what it is about, or null.
+If you are not promising a future time, set "commitment" to null. Do not promise a time you cannot keep.
+
 [OUTPUT]
 Return strictly valid JSON and nothing else, in exactly this shape:
-{{"type": "text" | "reply" | "reaction", "text": "<message text or null>", "reaction": "<single emoji or null>"}}
+{{"type": "text" | "reply" | "reaction", "text": "<message text or null>", "reaction": "<single emoji or null>", "commitment": {{"kind": "follow_up" | "deferred_reply", "window": "<one of the windows above>", "topic": "<short phrase or null>"}} | null}}
 
 - "type": "text" → provide "text" (string), set "reaction" to null.
 - "type": "reply" → provide "text" (string), set "reaction" to null.
 - "type": "reaction" → provide "reaction" (one emoji), set "text" to null.
+- "commitment" → the object above when you promised a future time, otherwise null.
 No narration, no extra keys, no markdown.""".strip()
 
     if prompt_type == "memory_decision":
